@@ -23,6 +23,7 @@ Créer un PIN de 6 chiffres ou plus. Pour la prise en main, saisir uniquement de
 - Import/capture et copie des photos dans le stockage privé.
 - Export PDF local partageable via le dialogue système.
 - Envoi des photos par courriel, avec réduction des images et répartition en lots de moins de 5 Mo.
+- Génération d’un compte rendu opérationnel par IA locale à partir des informations de la fiche, avec relecture, modification et copie. Le modèle (environ 345 Mo) se télécharge une fois ; les données de la fiche restent sur l’appareil.
 - Association de véhicules à une ou plusieurs identités.
 
 ## Limites à valider avant usage réel

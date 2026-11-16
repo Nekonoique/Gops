@@ -11,6 +11,8 @@ dependencies:
     sdk: flutter
   flutter_localizations:
     sdk: flutter
+  flutter_edge_ai: ^2.6.0
+  flutter_edge_ai_litertlm: ^1.20.0
   sqflite_sqlcipher: ^3.4.1
   flutter_secure_storage: ^11.2.0
   local_auth: ^3.0.2

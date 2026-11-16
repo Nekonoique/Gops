@@ -16,6 +16,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
 import 'data/database.dart';
+import 'ai/cro_ai_service.dart';
 import 'security/security_service.dart';
 
 void main() {
@@ -624,6 +625,8 @@ class _InterventionEditorState extends State<InterventionEditor>
   String _saveState = 'Chargement…';
   bool _loading = true;
   bool _sendingPhotos = false;
+  bool _generatingCro = false;
+  int _croModelDownloadProgress = 0;
   List<Map<String, Object?>> _identities = [], _vehicles = [], _photos = [];
   final _fields = const [
     'date',
@@ -1604,15 +1607,190 @@ class _InterventionEditorState extends State<InterventionEditor>
       ),
     ],
   );
+  Future<Map<String, Object?>> _croSourceFacts() async {
+    final identitiesById = {
+      for (final person in _identities) person['id']! as String: person,
+    };
+    final people = _identities.map((person) {
+      final data = <String, Object?>{
+        'Identité': '${person['first_names'] ?? ''} ${person['surname'] ?? ''}'
+            .trim(),
+        'Nom d’usage': person['usage_name'],
+        'Qualité dans l’intervention': person['role'],
+        'Date de naissance': _displayDate(person['birth_date']),
+        'Lieu de naissance': person['birth_place'],
+        'Nationalité': person['nationality'],
+        'Adresse': [
+          person['address'],
+          person['postal_code'],
+          person['city'],
+        ].where((part) => (part ?? '').toString().trim().isNotEmpty).join(', '),
+        'Observations': person['observations'],
+      };
+      data.removeWhere((_, value) => (value ?? '').toString().trim().isEmpty);
+      return data;
+    }).toList();
+    final vehicles = <Map<String, Object?>>[];
+    for (final vehicle in _vehicles) {
+      final linkedIds = await GopsDatabase.instance.vehicleIdentityIds(
+        vehicle['id']! as String,
+      );
+      final linkedPeople = linkedIds
+          .map((id) => identitiesById[id])
+          .whereType<Map<String, Object?>>()
+          .map(
+            (person) =>
+                '${person['first_names'] ?? ''} ${person['surname'] ?? ''}'
+                    .trim(),
+          )
+          .where((name) => name.isNotEmpty)
+          .toList();
+      final data = <String, Object?>{
+        'Immatriculation': vehicle['registration'],
+        'Marque': vehicle['make'],
+        'Modèle': vehicle['model'],
+        'Type': vehicle['kind'],
+        'Couleur': vehicle['color'],
+        'Pays': vehicle['country'],
+        'Personnes associées': linkedPeople,
+        'Observations': vehicle['observations'],
+      };
+      data.removeWhere(
+        (_, value) =>
+            value == null ||
+            (value is String && value.trim().isEmpty) ||
+            (value is List && value.isEmpty),
+      );
+      vehicles.add(data);
+    }
+    return {
+      'Intervention': {
+        'Nature': _controllers['nature']!.text.trim(),
+        'Date': _displayDate(_controllers['date']!.text),
+        'Heure': _controllers['time']!.text.trim(),
+        'Lieu': _controllers['location']!.text.trim(),
+        'Faits et observations saisis': _controllers['observations']!.text
+            .trim(),
+        'Notes de compte rendu déjà saisies': _controllers['report']!.text
+            .trim(),
+      },
+      'Personnes': people,
+      'Véhicules': vehicles,
+    };
+  }
+
+  Future<void> _generateCro() async {
+    if (_generatingCro) return;
+    setState(() {
+      _generatingCro = true;
+      _croModelDownloadProgress = 0;
+    });
+    try {
+      if (!await CroAiService.isModelInstalled()) {
+        if (!mounted) return;
+        final download = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Préparer la génération locale'),
+            content: const Text(
+              'Le modèle d’IA (environ 345 Mo) doit être téléchargé une seule fois. Ensuite, il fonctionnera hors connexion. Les données de la fiche restent sur ce téléphone et ne sont envoyées à aucun serveur.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Plus tard'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('Télécharger'),
+              ),
+            ],
+          ),
+        );
+        if (download != true) return;
+        await CroAiService.installModel(
+          onProgress: (progress) {
+            if (mounted) setState(() => _croModelDownloadProgress = progress);
+          },
+        );
+      }
+      if (!mounted) return;
+      setState(() => _croModelDownloadProgress = 100);
+      final result = await CroAiService.generate(await _croSourceFacts());
+      if (!mounted) return;
+      _controllers['report']!.text = result;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Compte rendu généré. Relisez-le avant utilisation.'),
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Génération impossible : $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _generatingCro = false);
+    }
+  }
+
+  Future<void> _copyCro() async {
+    final text = _controllers['report']!.text.trim();
+    if (text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Compte rendu copié.')));
+  }
+
   Widget _reportSection() => ListView(
     padding: const EdgeInsets.all(16),
     children: [
       const Text(
-        'Compte rendu',
+        'Compte rendu opérationnel',
         style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
       ),
+      const SizedBox(height: 8),
+      const Text(
+        'L’IA rédige sur ce téléphone à partir des faits, identités et véhicules de la fiche. Relisez toujours le texte généré.',
+        style: TextStyle(color: Colors.white70),
+      ),
       const SizedBox(height: 12),
-      _field('report', 'Rédiger le compte rendu', maxLines: 18),
+      Row(
+        children: [
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: _generatingCro ? null : _generateCro,
+              icon: _generatingCro
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.auto_awesome_outlined),
+              label: Text(
+                _generatingCro
+                    ? _croModelDownloadProgress < 100
+                          ? 'Téléchargement $_croModelDownloadProgress %'
+                          : 'Rédaction du compte rendu…'
+                    : 'Générer avec l’IA',
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton.filledTonal(
+            tooltip: 'Copier le compte rendu',
+            onPressed: _controllers['report']!.text.trim().isEmpty
+                ? null
+                : _copyCro,
+            icon: const Icon(Icons.copy_outlined),
+          ),
+        ],
+      ),
+      const SizedBox(height: 8),
+      _field('report', 'Compte rendu à relire et modifier', maxLines: 18),
     ],
   );
 
