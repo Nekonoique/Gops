@@ -80,4 +80,6 @@ class SecurityService {
   );
   Future<void> resetFailures() async =>
       _storage.write(key: 'gops_failed_attempts', value: '0');
+
+  Future<void> reset() => _storage.deleteAll();
 }

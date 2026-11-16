@@ -17,6 +17,22 @@ class GopsDatabase {
   Future<bool> get isInitialized async =>
       await _storage.read(key: 'gops_db_key') != null;
 
+  Future<void> reset() async {
+    final directory = await getApplicationDocumentsDirectory();
+    final databasePath = p.join(directory.path, 'gops.sqlite');
+    final openDatabase = _database;
+    _database = null;
+    if (openDatabase != null) await openDatabase.close();
+    await deleteDatabase(databasePath);
+    for (final suffix in ['-wal', '-shm']) {
+      final file = File('$databasePath$suffix');
+      if (await file.exists()) await file.delete();
+    }
+    final photos = Directory(p.join(directory.path, 'gops_photos'));
+    if (await photos.exists()) await photos.delete(recursive: true);
+    await _storage.delete(key: 'gops_db_key');
+  }
+
   Future<void> initialize() async {
     if (await isInitialized) return;
     final key = List<int>.generate(32, (_) => Random.secure().nextInt(256));
@@ -84,7 +100,9 @@ class GopsDatabase {
       (SELECT COUNT(*) FROM identities x WHERE x.intervention_id=i.id) AS identity_count,
       (SELECT COUNT(*) FROM vehicles v WHERE v.intervention_id=i.id) AS vehicle_count,
       (SELECT COUNT(*) FROM photos p WHERE p.intervention_id=i.id) AS photo_count
-      FROM interventions i WHERE i.reference LIKE ? OR i.date LIKE ? OR i.time LIKE ?
+      FROM interventions i WHERE i.date LIKE ?
+      OR (substr(i.date, 9, 2) || '/' || substr(i.date, 6, 2) || '/' || substr(i.date, 1, 4)) LIKE ?
+      OR i.time LIKE ?
       OR i.location LIKE ? OR i.nature LIKE ? OR i.observations LIKE ? OR i.report LIKE ?
       ORDER BY i.date DESC, i.time DESC''',
       [q, q, q, q, q, q, q],

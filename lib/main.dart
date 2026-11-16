@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_email_sender/flutter_email_sender.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -25,6 +27,57 @@ const navy = Color(0xFF10243A);
 const background = Color(0xFF101820);
 const surface = Color(0xFF1B2732);
 const blue = Color(0xFF69B9F4);
+
+DateTime? _parseDate(String value) {
+  final raw = value.trim();
+  final iso = DateTime.tryParse(raw);
+  if (iso != null) return DateTime(iso.year, iso.month, iso.day);
+  final parts = raw.split(RegExp(r'[/.-]'));
+  if (parts.length != 3) return null;
+  final day = int.tryParse(parts[0]);
+  final month = int.tryParse(parts[1]);
+  final year = int.tryParse(parts[2]);
+  if (day == null || month == null || year == null) return null;
+  final date = DateTime(year, month, day);
+  if (date.day != day || date.month != month || date.year != year) return null;
+  return date;
+}
+
+String _displayDate(Object? value) {
+  final raw = (value ?? '').toString().trim();
+  final date = _parseDate(raw);
+  return date == null ? raw : DateFormat('dd/MM/yyyy').format(date);
+}
+
+String _storedDate(String value) {
+  final date = _parseDate(value);
+  return date == null ? value.trim() : DateFormat('yyyy-MM-dd').format(date);
+}
+
+Uint8List _compressPhotoForEmail(Uint8List bytes) {
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) throw const FormatException('Image illisible.');
+  decoded.exif = img.ExifData();
+  decoded.iccProfile = null;
+  decoded.textData = null;
+  var image = decoded;
+  for (final maxDimension in [1600, 1200, 900, 700]) {
+    if (image.width > maxDimension || image.height > maxDimension) {
+      image = img.copyResize(
+        image,
+        width: image.width >= image.height ? maxDimension : null,
+        height: image.height > image.width ? maxDimension : null,
+      );
+    }
+    for (final quality in [78, 68, 58, 48, 38]) {
+      final result = img.encodeJpg(image, quality: quality);
+      if (result.length <= 2_500_000) return Uint8List.fromList(result);
+    }
+  }
+  throw StateError(
+    'Cette photo est trop volumineuse pour être jointe à un e-mail.',
+  );
+}
 
 class GopsApp extends StatefulWidget {
   const GopsApp({super.key});
@@ -94,6 +147,13 @@ class _GopsAppState extends State<GopsApp> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) => MaterialApp(
     title: 'GOPS',
+    locale: const Locale('fr', 'FR'),
+    supportedLocales: const [Locale('fr', 'FR')],
+    localizationsDelegates: const [
+      GlobalMaterialLocalizations.delegate,
+      GlobalWidgetsLocalizations.delegate,
+      GlobalCupertinoLocalizations.delegate,
+    ],
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
       brightness: Brightness.dark,
@@ -152,6 +212,7 @@ class _GopsAppState extends State<GopsApp> with WidgetsBindingObserver {
                   : HomePage(
                       onActivity: touch,
                       onLock: () => setState(() => _locked = true),
+                      onReset: () => setState(() => _locked = true),
                     );
             },
           ),
@@ -199,7 +260,14 @@ class _PinSetupState extends State<PinSetup> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.shield_moon_outlined, size: 64, color: blue),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(26),
+                child: Image.asset(
+                  'assets/gops_logo.png',
+                  width: 128,
+                  height: 128,
+                ),
+              ),
               const SizedBox(height: 16),
               Text(
                 'Bienvenue dans GOPS',
@@ -244,7 +312,7 @@ class _PinSetupState extends State<PinSetup> {
               ),
               const SizedBox(height: 20),
               const Text(
-                'Utilisez uniquement des données fictives tant que l’application n’a pas été validée par les responsables compétents.',
+                '',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white60),
               ),
@@ -347,8 +415,13 @@ class _PinUnlockState extends State<PinUnlock> {
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({required this.onActivity, required this.onLock, super.key});
-  final VoidCallback onActivity, onLock;
+  const HomePage({
+    required this.onActivity,
+    required this.onLock,
+    required this.onReset,
+    super.key,
+  });
+  final VoidCallback onActivity, onLock, onReset;
   @override
   State<HomePage> createState() => _HomePageState();
 }
@@ -362,7 +435,16 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: const Text('GOPS'),
+      title: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.asset('assets/gops_logo.png', width: 36, height: 36),
+          ),
+          const SizedBox(width: 10),
+          const Text('GOPS'),
+        ],
+      ),
       actions: [
         IconButton(
           tooltip: 'Paramètres',
@@ -370,7 +452,9 @@ class _HomePageState extends State<HomePage> {
             widget.onActivity();
             await Navigator.push(
               context,
-              MaterialPageRoute(builder: (_) => const SettingsPage()),
+              MaterialPageRoute(
+                builder: (_) => SettingsPage(onReset: widget.onReset),
+              ),
             );
             _refresh();
           },
@@ -409,7 +493,7 @@ class _HomePageState extends State<HomePage> {
             },
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.search),
-              hintText: 'Rechercher référence, date ou nature',
+              hintText: 'Rechercher nature, date ou lieu',
             ),
           ),
         ),
@@ -429,6 +513,7 @@ class _HomePageState extends State<HomePage> {
                   itemCount: rows.length,
                   itemBuilder: (context, index) {
                     final row = rows[index];
+                    final nature = (row['nature'] as String? ?? '').trim();
                     return Card(
                       child: ListTile(
                         contentPadding: const EdgeInsets.symmetric(
@@ -436,7 +521,9 @@ class _HomePageState extends State<HomePage> {
                           vertical: 10,
                         ),
                         title: Text(
-                          (row['reference'] as String?) ?? 'Sans référence',
+                          nature.isEmpty
+                              ? 'Intervention sans intitulé'
+                              : nature,
                           style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
                         subtitle: Padding(
@@ -445,7 +532,7 @@ class _HomePageState extends State<HomePage> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                '${row['date']} · ${row['time']} · ${(row['nature'] as String?)?.isEmpty == true ? 'Nature non renseignée' : row['nature']}',
+                                '${_displayDate(row['date'])} · ${row['time']} · ${row['location']}',
                               ),
                               const SizedBox(height: 8),
                               Text(
@@ -536,9 +623,9 @@ class _InterventionEditorState extends State<InterventionEditor>
   String? _id;
   String _saveState = 'Chargement…';
   bool _loading = true;
+  bool _sendingPhotos = false;
   List<Map<String, Object?>> _identities = [], _vehicles = [], _photos = [];
   final _fields = const [
-    'reference',
     'date',
     'time',
     'location',
@@ -577,8 +664,8 @@ class _InterventionEditorState extends State<InterventionEditor>
         data ??
         {
           'id': DateTime.now().microsecondsSinceEpoch.toString(),
-          'reference': 'GOPS-${DateFormat('yyyyMMdd-HHmmss').format(now)}',
-          'date': DateFormat('yyyy-MM-dd').format(now),
+          'reference': '',
+          'date': DateFormat('dd/MM/yyyy').format(now),
           'time': DateFormat('HH:mm').format(now),
           'location': '',
           'nature': '',
@@ -588,7 +675,9 @@ class _InterventionEditorState extends State<InterventionEditor>
         };
     _id ??= values['id'] as String;
     for (final f in _fields) {
-      _controllers[f]!.text = (values[f] ?? '').toString();
+      _controllers[f]!.text = f == 'date'
+          ? _displayDate(values[f])
+          : (values[f] ?? '').toString();
     }
     await _reloadChildren();
     if (mounted)
@@ -620,8 +709,8 @@ class _InterventionEditorState extends State<InterventionEditor>
       final existing = await GopsDatabase.instance.intervention(_id!);
       await GopsDatabase.instance.saveIntervention({
         'id': _id,
-        'reference': _controllers['reference']!.text.trim(),
-        'date': _controllers['date']!.text.trim(),
+        'reference': existing?['reference'] ?? '',
+        'date': _storedDate(_controllers['date']!.text),
         'time': _controllers['time']!.text.trim(),
         'location': _controllers['location']!.text.trim(),
         'nature': _controllers['nature']!.text.trim(),
@@ -865,13 +954,18 @@ class _InterventionEditorState extends State<InterventionEditor>
   Widget _general() => ListView(
     padding: const EdgeInsets.all(16),
     children: [
-      _field('reference', 'Référence'),
+      _field(
+        'nature',
+        'Nature / intitulé de l’intervention',
+        hintText: 'Ex. VIF Dupont et Dupond - ARANDON',
+      ),
       Row(
         children: [
           Expanded(
             child: _field(
               'date',
-              'Date (AAAA-MM-JJ)',
+              'Date (JJ/MM/AAAA)',
+              readOnly: true,
               suffix: IconButton(
                 tooltip: 'Choisir une date',
                 icon: const Icon(Icons.calendar_today_outlined),
@@ -894,12 +988,11 @@ class _InterventionEditorState extends State<InterventionEditor>
         ],
       ),
       _field('location', 'Lieu'),
-      _field('nature', 'Nature de l’intervention'),
       _field('observations', 'Observations complémentaires', maxLines: 4),
     ],
   );
   Future<void> _pickDate() async {
-    final current = DateTime.tryParse(_controllers['date']!.text) ?? DateTime.now();
+    final current = _parseDate(_controllers['date']!.text) ?? DateTime.now();
     final selected = await showDatePicker(
       context: context,
       initialDate: current,
@@ -908,7 +1001,7 @@ class _InterventionEditorState extends State<InterventionEditor>
       helpText: 'Date de l’intervention',
     );
     if (selected != null) {
-      _controllers['date']!.text = DateFormat('yyyy-MM-dd').format(selected);
+      _controllers['date']!.text = DateFormat('dd/MM/yyyy').format(selected);
     }
   }
 
@@ -919,7 +1012,9 @@ class _InterventionEditorState extends State<InterventionEditor>
     final selected = await showTimePicker(
       context: context,
       initialTime: TimeOfDay(
-        hour: hour != null && hour >= 0 && hour < 24 ? hour : TimeOfDay.now().hour,
+        hour: hour != null && hour >= 0 && hour < 24
+            ? hour
+            : TimeOfDay.now().hour,
         minute: minute != null && minute >= 0 && minute < 60 ? minute : 0,
       ),
       helpText: 'Heure de l’intervention',
@@ -930,12 +1025,24 @@ class _InterventionEditorState extends State<InterventionEditor>
     }
   }
 
-  Widget _field(String key, String label, {int maxLines = 1, Widget? suffix}) => Padding(
+  Widget _field(
+    String key,
+    String label, {
+    int maxLines = 1,
+    String? hintText,
+    Widget? suffix,
+    bool readOnly = false,
+  }) => Padding(
     padding: const EdgeInsets.only(bottom: 12),
     child: TextField(
       controller: _controllers[key],
       maxLines: maxLines,
-      decoration: InputDecoration(labelText: label, suffixIcon: suffix),
+      readOnly: readOnly,
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hintText,
+        suffixIcon: suffix,
+      ),
     ),
   );
   Widget _identitySection() => _recordSection(
@@ -1070,7 +1177,11 @@ class _InterventionEditorState extends State<InterventionEditor>
           };
     final controllers = {
       for (final key in fields.keys)
-        key: TextEditingController(text: (row?[key] ?? '').toString()),
+        key: TextEditingController(
+          text: key == 'birth_date'
+              ? _displayDate(row?[key])
+              : (row?[key] ?? '').toString(),
+        ),
     };
     String role = controllers['role']?.text.isNotEmpty == true
         ? controllers['role']!.text
@@ -1098,7 +1209,23 @@ class _InterventionEditorState extends State<InterventionEditor>
                         padding: const EdgeInsets.only(bottom: 8),
                         child: TextField(
                           controller: controllers[entry.key],
-                          decoration: InputDecoration(labelText: entry.value),
+                          readOnly: entry.key == 'birth_date',
+                          decoration: InputDecoration(
+                            labelText: entry.value,
+                            suffixIcon: entry.key == 'birth_date'
+                                ? IconButton(
+                                    tooltip: 'Choisir une date',
+                                    icon: const Icon(
+                                      Icons.calendar_today_outlined,
+                                    ),
+                                    onPressed: () => _pickRecordDate(
+                                      context,
+                                      controllers[entry.key]!,
+                                      setDialog,
+                                    ),
+                                  )
+                                : null,
+                          ),
                         ),
                       ),
                   if (identity)
@@ -1178,6 +1305,192 @@ class _InterventionEditorState extends State<InterventionEditor>
       await _reloadChildren();
     }
     for (final c in controllers.values) c.dispose();
+  }
+
+  Future<void> _pickRecordDate(
+    BuildContext dialogContext,
+    TextEditingController controller,
+    StateSetter setDialog,
+  ) async {
+    final selected = await showDatePicker(
+      context: dialogContext,
+      initialDate: _parseDate(controller.text) ?? DateTime(2000),
+      firstDate: DateTime(1900),
+      lastDate: DateTime.now(),
+      helpText: 'Date de naissance',
+    );
+    if (selected != null) {
+      setDialog(
+        () => controller.text = DateFormat('dd/MM/yyyy').format(selected),
+      );
+    }
+  }
+
+  Future<void> _emailPhotos() async {
+    if (_photos.isEmpty || _sendingPhotos) return;
+    try {
+      final capabilities = await FlutterEmailSender.getCapabilities();
+      if (!capabilities.canSend || !capabilities.supportsAttachments) {
+        _showPhotoEmailMessage(
+          'Aucune application mail avec pièces jointes n’est disponible. Sur iPhone, configurez un compte dans l’app Mail d’Apple.',
+        );
+        return;
+      }
+    } catch (_) {
+      _showPhotoEmailMessage('Impossible d’ouvrir une application mail.');
+      return;
+    }
+    final recipient = await _askPhotoRecipient();
+    if (recipient == null || !mounted) return;
+    setState(() => _sendingPhotos = true);
+    Directory? temp;
+    try {
+      temp = await Directory.systemTemp.createTemp('gops_mail_');
+      final attachments = <File>[];
+      for (var i = 0; i < _photos.length; i++) {
+        if (mounted)
+          setState(
+            () => _saveState = 'Préparation ${i + 1}/${_photos.length}…',
+          );
+        final source = File(_photos[i]['local_path']! as String);
+        final reduced = await compute(
+          _compressPhotoForEmail,
+          await source.readAsBytes(),
+        );
+        final file = File(
+          p.join(temp.path, 'photo_${(i + 1).toString().padLeft(2, '0')}.jpg'),
+        );
+        await file.writeAsBytes(reduced, flush: true);
+        attachments.add(file);
+      }
+      const maxBatchBytes =
+          3_200_000; // L’encodage MIME augmente la taille des pièces jointes.
+      final batches = <List<File>>[];
+      var batch = <File>[];
+      var batchSize = 0;
+      for (final file in attachments) {
+        final size = await file.length();
+        if (batch.isNotEmpty && batchSize + size > maxBatchBytes) {
+          batches.add(batch);
+          batch = <File>[];
+          batchSize = 0;
+        }
+        batch.add(file);
+        batchSize += size;
+      }
+      if (batch.isNotEmpty) batches.add(batch);
+      final intervention = _controllers['nature']!.text.trim();
+      final subject = intervention.isEmpty
+          ? 'Photos de l’intervention'
+          : 'Photos – $intervention';
+      for (var i = 0; i < batches.length; i++) {
+        if (!mounted) break;
+        setState(() => _saveState = 'Envoi ${i + 1}/${batches.length}…');
+        final result = await FlutterEmailSender.send(
+          Email(
+            recipients: [recipient],
+            subject: batches.length == 1
+                ? subject
+                : '$subject (${i + 1}/${batches.length})',
+            body:
+                'Photos de l’intervention${intervention.isEmpty ? '' : ' : $intervention'}.',
+            attachmentPaths: batches[i].map((f) => f.path).toList(),
+          ),
+        );
+        if (result == EmailSendResult.cancelled ||
+            result == EmailSendResult.saved)
+          break;
+        if (result == EmailSendResult.unknown && i + 1 < batches.length) {
+          if (!await _confirmNextPhotoEmail(i + 2, batches.length)) break;
+        }
+      }
+    } catch (e) {
+      _showPhotoEmailMessage(
+        'Préparation ou ouverture du mail impossible : $e',
+      );
+    } finally {
+      if (temp != null && await temp.exists())
+        await temp.delete(recursive: true);
+      if (mounted)
+        setState(() {
+          _sendingPhotos = false;
+          _saveState = 'Enregistré';
+        });
+    }
+  }
+
+  Future<String?> _askPhotoRecipient() async {
+    final controller = TextEditingController();
+    final recipient = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Envoyer les photos'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Les images seront réduites et réparties en plusieurs mails si nécessaire. Chaque mail reste sous 5 Mo.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(
+                labelText: 'Adresse e-mail du destinataire',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final value = controller.text.trim();
+              if (!value.contains('@') ||
+                  value.endsWith('@') ||
+                  !value.contains('.'))
+                return;
+              Navigator.pop(dialogContext, value);
+            },
+            child: const Text('Continuer'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return recipient;
+  }
+
+  Future<bool> _confirmNextPhotoEmail(int next, int total) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text('Mail suivant'),
+          content: Text(
+            'L’application mail ne confirme pas l’envoi. Si vous avez envoyé le mail précédent, ouvrez le suivant ($next sur $total).',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(c, false),
+              child: const Text('Arrêter'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(c, true),
+              child: const Text('Continuer'),
+            ),
+          ],
+        ),
+      ) ??
+      false;
+
+  void _showPhotoEmailMessage(String message) {
+    if (mounted)
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Widget _photoSection() => Column(
@@ -1264,10 +1577,29 @@ class _InterventionEditorState extends State<InterventionEditor>
       ),
       Padding(
         padding: const EdgeInsets.all(12),
-        child: FilledButton.icon(
-          onPressed: () => _addPhoto(),
-          icon: const Icon(Icons.add_a_photo_outlined),
-          label: const Text('Ajouter une photo'),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            FilledButton.icon(
+              onPressed: _sendingPhotos ? null : () => _addPhoto(),
+              icon: const Icon(Icons.add_a_photo_outlined),
+              label: const Text('Ajouter une photo'),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _photos.isEmpty || _sendingPhotos
+                  ? null
+                  : _emailPhotos,
+              icon: _sendingPhotos
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.email_outlined),
+              label: Text(_sendingPhotos ? _saveState : 'Envoyer par e-mail'),
+            ),
+          ],
         ),
       ),
     ],
@@ -1383,9 +1715,9 @@ class _InterventionEditorState extends State<InterventionEditor>
     );
     if (included == null) return;
     final doc = pw.Document();
-    final date = _controllers['date']!.text;
+    final date = _displayDate(_controllers['date']!.text);
     final info = [
-      ('Référence', _controllers['reference']!.text),
+      ('Nature / intitulé', _controllers['nature']!.text),
       ('Date', date),
       ('Heure', _controllers['time']!.text),
       ('Lieu', _controllers['location']!.text),
@@ -1451,20 +1783,22 @@ class _InterventionEditorState extends State<InterventionEditor>
                       '${x['first_names']} ${x['surname']} · ${x['role']}',
                       style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
                     ),
-                    for (final key in [
-                      'usage_name',
-                      'birth_date',
-                      'birth_place',
-                      'nationality',
-                      'address',
-                      'postal_code',
-                      'city',
-                      'phone',
-                      'email',
-                      'observations',
-                    ])
-                      if ((x[key] ?? '').toString().trim().isNotEmpty)
-                        pw.Text('${key.replaceAll('_', ' ')} : ${x[key]}'),
+                    for (final field in const {
+                      'usage_name': 'Nom d’usage',
+                      'birth_date': 'Date de naissance',
+                      'birth_place': 'Lieu de naissance',
+                      'nationality': 'Nationalité',
+                      'address': 'Adresse',
+                      'postal_code': 'Code postal',
+                      'city': 'Ville',
+                      'phone': 'Téléphone',
+                      'email': 'Adresse électronique',
+                      'observations': 'Observations',
+                    }.entries)
+                      if ((x[field.key] ?? '').toString().trim().isNotEmpty)
+                        pw.Text(
+                          '${field.value} : ${field.key == 'birth_date' ? _displayDate(x[field.key]) : x[field.key]}',
+                        ),
                   ],
                 ),
               ),
@@ -1531,19 +1865,29 @@ class _InterventionEditorState extends State<InterventionEditor>
     );
     await Printing.sharePdf(
       bytes: await doc.save(),
-      filename: 'GOPS-${_controllers['reference']!.text}.pdf',
+      filename: 'GOPS-${_safeFilename(_controllers['nature']!.text, date)}.pdf',
     );
+  }
+
+  String _safeFilename(String value, String date) {
+    final name = value
+        .trim()
+        .replaceAll(RegExp(r'[\\/:*?"<>|]'), '-')
+        .replaceAll(RegExp(r'\s+'), '_');
+    return name.isEmpty ? 'intervention-$date' : name;
   }
 }
 
 class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
+  const SettingsPage({required this.onReset, super.key});
+  final VoidCallback onReset;
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
 class _SettingsPageState extends State<SettingsPage> {
   bool _biometric = false;
+  bool _resetting = false;
   int _minutes = 5;
   @override
   void initState() {
@@ -1613,6 +1957,71 @@ class _SettingsPageState extends State<SettingsPage> {
       ).showSnackBar(const SnackBar(content: Text('PIN modifié.')));
   }
 
+  Future<void> _resetApplication() async {
+    final pin = TextEditingController();
+    final enteredPin = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Réinitialiser l’application ?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Cette action effacera définitivement toutes les interventions, les personnes, les véhicules, les photos, le code PIN et les réglages. Un nouveau code PIN sera demandé au prochain démarrage.',
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: pin,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+              decoration: const InputDecoration(labelText: 'Code PIN actuel'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red.shade700),
+            onPressed: () => Navigator.pop(dialogContext, pin.text),
+            child: const Text('Tout effacer'),
+          ),
+        ],
+      ),
+    );
+    pin.dispose();
+    if (enteredPin == null || enteredPin.isEmpty || !mounted) return;
+    final pinIsValid = await SecurityService.instance.verifyPin(enteredPin);
+    if (!mounted) return;
+    if (!pinIsValid) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Code PIN incorrect. Rien n’a été effacé.'),
+        ),
+      );
+      return;
+    }
+    setState(() => _resetting = true);
+    try {
+      await GopsDatabase.instance.reset();
+      await SecurityService.instance.reset();
+      await GopsDatabase.instance.initialize();
+      if (!mounted) return;
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      widget.onReset();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _resetting = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('La réinitialisation a échoué : $error')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Paramètres')),
@@ -1636,9 +2045,11 @@ class _SettingsPageState extends State<SettingsPage> {
           subtitle: const Text('Empreinte ou reconnaissance faciale'),
           value: _biometric,
           onChanged: (v) async {
-            if (v &&
-                !await SecurityService.instance.authenticateBiometrically()) {
-              if (mounted)
+            if (v) {
+              final authenticated = await SecurityService.instance
+                  .authenticateBiometrically();
+              if (!mounted) return;
+              if (!authenticated) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
                     content: Text(
@@ -1646,9 +2057,11 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                   ),
                 );
-              return;
+                return;
+              }
             }
             await SecurityService.instance.setBiometric(v);
+            if (!mounted) return;
             setState(() => _biometric = v);
           },
         ),
@@ -1702,12 +2115,26 @@ class _SettingsPageState extends State<SettingsPage> {
             'Application individuelle · fonctionnement hors connexion. Export PDF via le partage système à l’initiative de l’utilisateur.',
           ),
         ),
+        const Divider(),
+        const ListTile(
+          title: Text(
+            'Réinitialisation',
+            style: TextStyle(fontWeight: FontWeight.bold),
+          ),
+        ),
+        ListTile(
+          leading: const Icon(
+            Icons.delete_forever_outlined,
+            color: Colors.redAccent,
+          ),
+          title: const Text('Réinitialiser l’application'),
+          subtitle: const Text('Effacer les données et recommencer'),
+          enabled: !_resetting,
+          onTap: _resetting ? null : _resetApplication,
+        ),
         const Padding(
           padding: EdgeInsets.all(16),
-          child: Text(
-            'Utiliser uniquement des données fictives avant validation institutionnelle du traitement et de l’appareil.',
-            style: TextStyle(color: Colors.white60),
-          ),
+          child: Text('', style: TextStyle(color: Colors.white60)),
         ),
       ],
     ),

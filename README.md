@@ -1,6 +1,6 @@
 # GOPS
 
-Application Flutter hors connexion de gestion personnelle d'interventions. La V1 stocke les données dans une base SQLite chiffrée et les secrets dans le stockage sécurisé du système. Aucune synchronisation ni transmission externe n'est implémentée.
+Application Flutter de gestion personnelle d'interventions. Les données sont stockées dans une base SQLite chiffrée et les secrets dans le stockage sécurisé du système. Les photos peuvent être préparées localement puis jointes à des courriels via l'application mail du téléphone, après validation de l'utilisateur.
 
 ## Démarrage
 
@@ -17,11 +17,12 @@ Créer un PIN de 6 chiffres ou plus. Pour la prise en main, saisir uniquement de
 ## Fonctions présentes dans la V1
 
 - Verrouillage PIN, temporisation progressive et biométrie si disponible.
-- Base locale chiffrée, références datées, sauvegarde automatique des formulaires.
+- Base locale chiffrée, fiches datées, sauvegarde automatique des formulaires.
 - Liste et recherche d'interventions.
 - Sections générales, identités, véhicules, photographies et compte rendu.
 - Import/capture et copie des photos dans le stockage privé.
 - Export PDF local partageable via le dialogue système.
+- Envoi des photos par courriel, avec réduction des images et répartition en lots de moins de 5 Mo.
 - Association de véhicules à une ou plusieurs identités.
 
 ## Limites à valider avant usage réel
