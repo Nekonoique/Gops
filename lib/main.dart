@@ -991,7 +991,14 @@ class _InterventionEditorState extends State<InterventionEditor>
         ],
       ),
       _field('location', 'Lieu'),
-      _field('observations', 'Observations complémentaires', maxLines: 4),
+      _field(
+        'observations',
+        'Bloc note',
+        minLines: 6,
+        maxLines: 12,
+        helperText:
+            'Saisissez vos notes librement. L’IA s’appuiera dessus pour rédiger et améliorer le compte rendu.',
+      ),
     ],
   );
   Future<void> _pickDate() async {
@@ -1032,18 +1039,22 @@ class _InterventionEditorState extends State<InterventionEditor>
     String key,
     String label, {
     int maxLines = 1,
+    int? minLines,
     String? hintText,
+    String? helperText,
     Widget? suffix,
     bool readOnly = false,
   }) => Padding(
     padding: const EdgeInsets.only(bottom: 12),
     child: TextField(
       controller: _controllers[key],
+      minLines: minLines,
       maxLines: maxLines,
       readOnly: readOnly,
       decoration: InputDecoration(
         labelText: label,
         hintText: hintText,
+        helperText: helperText,
         suffixIcon: suffix,
       ),
     ),
@@ -1616,10 +1627,12 @@ class _InterventionEditorState extends State<InterventionEditor>
         'Identité': '${person['first_names'] ?? ''} ${person['surname'] ?? ''}'
             .trim(),
         'Nom d’usage': person['usage_name'],
-        'Qualité dans l’intervention': person['role'],
+        'Qualité de la personne': person['role'],
         'Date de naissance': _displayDate(person['birth_date']),
         'Lieu de naissance': person['birth_place'],
         'Nationalité': person['nationality'],
+        'Téléphone': person['phone'],
+        'Adresse électronique': person['email'],
         'Adresse': [
           person['address'],
           person['postal_code'],
@@ -1663,20 +1676,73 @@ class _InterventionEditorState extends State<InterventionEditor>
       );
       vehicles.add(data);
     }
+    final photos = _photos
+        .map(
+          (photo) => <String, Object?>{
+            'Catégorie': photo['category'],
+            'Description': photo['description'],
+          },
+        )
+        .where(
+          (photo) => (photo['Description'] ?? '').toString().trim().isNotEmpty,
+        )
+        .toList();
     return {
       'Intervention': {
         'Nature': _controllers['nature']!.text.trim(),
         'Date': _displayDate(_controllers['date']!.text),
         'Heure': _controllers['time']!.text.trim(),
         'Lieu': _controllers['location']!.text.trim(),
-        'Faits et observations saisis': _controllers['observations']!.text
-            .trim(),
+        'Bloc note': _controllers['observations']!.text.trim(),
         'Notes de compte rendu déjà saisies': _controllers['report']!.text
             .trim(),
       },
       'Personnes': people,
       'Véhicules': vehicles,
+      'Photographies décrites': photos,
     };
+  }
+
+  String _composeCro(Map<String, Object?> facts, String narrative) {
+    final intervention = facts['Intervention'] as Map<String, Object?>;
+    final out = StringBuffer('COMPTE RENDU OPÉRATIONNEL\n\n');
+    final context = <String, Object?>{
+      'Nature intervention': intervention['Nature'],
+      'Date': intervention['Date'],
+      'Heure': intervention['Heure'],
+      'Lieu': intervention['Lieu'],
+    };
+    for (final entry in context.entries) {
+      final value = (entry.value ?? '').toString().trim();
+      if (value.isNotEmpty) out.writeln('${entry.key} : $value');
+    }
+    out.write('\nFAITS ET DÉROULEMENT\n\n');
+    out.writeln(narrative.trim());
+
+    void appendRecords(String title, String key) {
+      final records = facts[key] as List<Map<String, Object?>>? ?? [];
+      if (records.isEmpty) return;
+      out.write('\n$title\n');
+      for (var i = 0; i < records.length; i++) {
+        out.write('\n${i + 1}. ');
+        out.writeln(
+          records[i].entries
+              .map((entry) {
+                final value = entry.value;
+                final rendered = value is List
+                    ? value.join(', ')
+                    : value.toString();
+                return '${entry.key} : $rendered';
+              })
+              .join(' · '),
+        );
+      }
+    }
+
+    appendRecords('PERSONNES CONCERNÉES', 'Personnes');
+    appendRecords('VÉHICULES CONCERNÉS', 'Véhicules');
+    appendRecords('PHOTOGRAPHIES', 'Photographies décrites');
+    return out.toString().trim();
   }
 
   Future<void> _generateCro() async {
@@ -1686,14 +1752,43 @@ class _InterventionEditorState extends State<InterventionEditor>
       _croModelDownloadProgress = 0;
     });
     try {
-      if (!await CroAiService.isModelInstalled()) {
-        if (!mounted) return;
+      if (!mounted) return;
+      final qualityInstalled = await CroAiService.isModelInstalled(
+        highQuality: true,
+      );
+      final useHighQuality = qualityInstalled
+          ? true
+          : await showDialog<bool>(
+              context: context,
+              builder: (dialogContext) => AlertDialog(
+                title: const Text('Améliorer la rédaction des comptes rendus'),
+                content: const Text(
+                  'Le modèle renforcé (Gemma 4 E2B, environ 2,6 Go) produit des textes plus développés. Il est téléchargé une seule fois et fonctionne ensuite hors connexion. Le modèle compact (345 Mo) reste disponible pour les téléphones disposant de moins de stockage. Les données de la fiche restent sur ce téléphone.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(dialogContext),
+                    child: const Text('Annuler'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(dialogContext, false),
+                    child: const Text('Modèle compact'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(dialogContext, true),
+                    child: const Text('Modèle renforcé'),
+                  ),
+                ],
+              ),
+            );
+      if (useHighQuality == null) return;
+      if (!await CroAiService.isModelInstalled(highQuality: useHighQuality)) {
         final download = await showDialog<bool>(
           context: context,
           builder: (dialogContext) => AlertDialog(
-            title: const Text('Préparer la génération locale'),
-            content: const Text(
-              'Le modèle d’IA (environ 345 Mo) doit être téléchargé une seule fois. Ensuite, il fonctionnera hors connexion. Les données de la fiche restent sur ce téléphone et ne sont envoyées à aucun serveur.',
+            title: const Text('Télécharger le modèle IA'),
+            content: Text(
+              'Le modèle sélectionné (environ ${useHighQuality ? '2,6 Go' : '345 Mo'}) doit être téléchargé une seule fois. Préférez une connexion Wi-Fi et vérifiez que le téléphone dispose d’assez d’espace libre.',
             ),
             actions: [
               TextButton(
@@ -1709,6 +1804,7 @@ class _InterventionEditorState extends State<InterventionEditor>
         );
         if (download != true) return;
         await CroAiService.installModel(
+          highQuality: useHighQuality,
           onProgress: (progress) {
             if (mounted) setState(() => _croModelDownloadProgress = progress);
           },
@@ -1716,9 +1812,13 @@ class _InterventionEditorState extends State<InterventionEditor>
       }
       if (!mounted) return;
       setState(() => _croModelDownloadProgress = 100);
-      final result = await CroAiService.generate(await _croSourceFacts());
+      final facts = await _croSourceFacts();
+      final result = await CroAiService.generate(
+        facts,
+        highQuality: useHighQuality,
+      );
       if (!mounted) return;
-      _controllers['report']!.text = result;
+      _controllers['report']!.text = _composeCro(facts, result);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Compte rendu généré. Relisez-le avant utilisation.'),
@@ -1900,7 +2000,7 @@ class _InterventionEditorState extends State<InterventionEditor>
       ('Heure', _controllers['time']!.text),
       ('Lieu', _controllers['location']!.text),
       ('Nature', _controllers['nature']!.text),
-      ('Observations', _controllers['observations']!.text),
+      ('Bloc note', _controllers['observations']!.text),
     ];
     final includedPhotos = <({Map<String, Object?> photo, List<int> bytes})>[];
     for (final photo in _photos) {
@@ -1920,7 +2020,7 @@ class _InterventionEditorState extends State<InterventionEditor>
           pw.Header(
             level: 0,
             child: pw.Text(
-              'GOPS · FICHE D’INTERVENTION',
+              'GOPS · FICHE INTERVENTION',
               style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold),
             ),
           ),
