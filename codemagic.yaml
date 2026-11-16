@@ -1,0 +1,35 @@
+
+workflows:
+  ios-unsigned:
+    name: Gops - iOS unsigned build
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+
+    scripts:
+      - name: Install Flutter dependencies
+        script: flutter pub get
+
+      - name: Install iOS dependencies
+        script: |
+          cd ios
+          pod install
+          cd ..
+
+      - name: Build iOS application
+        script: flutter build ios --release --no-codesign
+
+      - name: Package application
+        script: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -r Gops-unsigned.ipa Payload
+          rm -rf Payload
+
+    artifacts:
+      - Gops-unsigned.ipa
+      - /tmp/xcodebuild_logs/*.log
