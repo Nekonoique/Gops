@@ -25,6 +25,9 @@ dependencies:
   printing: ^5.15.1
   flutter_email_sender: ^11.2.0
   intl: ^0.20.3
+  file_picker: 13.3.3
+  share_plus: 13.3.1
+  archive: 4.7.1
 
 dev_dependencies:
   flutter_test:
@@ -35,3 +38,6 @@ flutter:
   uses-material-design: true
   assets:
     - assets/gops_logo.png
+    - assets/fonts/Rubik-Regular.ttf
+    - assets/fonts/Rubik-Medium.ttf
+    - assets/fonts/OFL.txt

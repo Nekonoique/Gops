@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_email_sender/flutter_email_sender.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -14,8 +15,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart' as pd;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'data/database.dart';
+import 'data/intervention_bundle_service.dart';
 import 'ai/cro_ai_service.dart';
 import 'security/security_service.dart';
 
@@ -433,6 +436,49 @@ class _HomePageState extends State<HomePage> {
   Future<List<Map<String, Object?>>> _load() =>
       GopsDatabase.instance.interventions(query: _query);
   Future<void> _refresh() async => setState(() {});
+
+  Future<void> _importIntervention() async {
+    try {
+      final picked = await FilePicker.pickFile(
+        dialogTitle: 'Importer une fiche GOPS',
+        type: FileType.custom,
+        allowedExtensions: const ['gops'],
+      );
+      if (picked == null) return;
+      final bundleSize = await picked.length();
+      if (bundleSize != null && bundleSize > 256 * 1024 * 1024) {
+        throw const FormatException(
+          'Le fichier GOPS dépasse la taille maximale de 256 Mo.',
+        );
+      }
+      final id = await InterventionBundleService.importBundle(
+        await picked.readAsBytes(),
+      );
+      if (!mounted) return;
+      widget.onActivity();
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Fiche importée.')));
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => InterventionEditor(
+            id: id,
+            onSaved: _refresh,
+            onLock: widget.onLock,
+          ),
+        ),
+      );
+      _refresh();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Import impossible : $error')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
@@ -447,6 +493,11 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       actions: [
+        IconButton(
+          tooltip: 'Importer une fiche GOPS',
+          onPressed: _importIntervention,
+          icon: const Icon(Icons.file_open_outlined),
+        ),
         IconButton(
           tooltip: 'Paramètres',
           onPressed: () async {
@@ -894,6 +945,11 @@ class _InterventionEditorState extends State<InterventionEditor>
           tooltip: 'Exporter en PDF',
           onPressed: _exportPdf,
           icon: const Icon(Icons.picture_as_pdf_outlined),
+        ),
+        IconButton(
+          tooltip: 'Partager la fiche GOPS',
+          onPressed: _shareIntervention,
+          icon: const Icon(Icons.ios_share_outlined),
         ),
         IconButton(
           tooltip: 'Supprimer',
@@ -1943,6 +1999,42 @@ class _InterventionEditorState extends State<InterventionEditor>
     if (mounted) Navigator.pop(context);
   }
 
+  Future<void> _shareIntervention() async {
+    await _save();
+    if (!await _confirm(
+      'Le fichier partagé contiendra les informations de la fiche, les identités, les véhicules et les photos. Il peut inclure des données personnelles. Continuer ?',
+    )) {
+      return;
+    }
+    try {
+      final bytes = await InterventionBundleService.exportBundle(_id!);
+      final temp = await getTemporaryDirectory();
+      final filename =
+          'GOPS-${_safeFilename(_controllers['nature']!.text, _displayDate(_controllers['date']!.text))}.gops';
+      final file = File(p.join(temp.path, filename));
+      await file.writeAsBytes(bytes, flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [
+            XFile(
+              file.path,
+              mimeType: 'application/vnd.gops.intervention+zip',
+              name: filename,
+            ),
+          ],
+          subject: 'Fiche GOPS · ${_controllers['nature']!.text.trim()}',
+          title: 'Partager la fiche GOPS',
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Partage impossible : $error')));
+      }
+    }
+  }
+
   Future<void> _exportPdf() async {
     await _save();
     final selection = <String, bool>{
@@ -1995,11 +2087,10 @@ class _InterventionEditorState extends State<InterventionEditor>
     final doc = pw.Document();
     final date = _displayDate(_controllers['date']!.text);
     final info = [
-      ('Nature / intitulé', _controllers['nature']!.text),
+      ('Nature de l’intervention', _controllers['nature']!.text),
       ('Date', date),
       ('Heure', _controllers['time']!.text),
       ('Lieu', _controllers['location']!.text),
-      ('Nature', _controllers['nature']!.text),
       ('Bloc note', _controllers['observations']!.text),
     ];
     final includedPhotos = <({Map<String, Object?> photo, List<int> bytes})>[];
@@ -2014,130 +2105,316 @@ class _InterventionEditorState extends State<InterventionEditor>
       if (include && await file.exists())
         includedPhotos.add((photo: photo, bytes: await file.readAsBytes()));
     }
+    const ink = pd.PdfColor(0.06, 0.13, 0.21);
+    const accent = pd.PdfColor(0.10, 0.34, 0.56);
+    const pale = pd.PdfColor(0.95, 0.97, 0.99);
+    const line = pd.PdfColor(0.82, 0.86, 0.90);
+    pw.Widget sectionTitle(String title) => pw.Container(
+      width: double.infinity,
+      margin: const pw.EdgeInsets.only(top: 14, bottom: 8),
+      padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: const pw.BoxDecoration(
+        color: ink,
+        border: pw.Border(left: pw.BorderSide(color: accent, width: 4)),
+      ),
+      child: pw.Text(
+        title.toUpperCase(),
+        style: pw.TextStyle(
+          color: pd.PdfColors.white,
+          fontSize: 11,
+          fontWeight: pw.FontWeight.bold,
+          letterSpacing: 0.8,
+        ),
+      ),
+    );
+    pw.Widget detail(String label, String value) => pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+      decoration: const pw.BoxDecoration(
+        color: pale,
+        border: pw.Border(bottom: pw.BorderSide(color: line, width: 0.5)),
+      ),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(
+            width: 132,
+            child: pw.Text(
+              label,
+              style: pw.TextStyle(
+                color: accent,
+                fontSize: 9,
+                fontWeight: pw.FontWeight.bold,
+              ),
+            ),
+          ),
+          pw.Expanded(
+            child: pw.Text(value, style: const pw.TextStyle(fontSize: 9.5)),
+          ),
+        ],
+      ),
+    );
+    pw.Widget card(List<pw.Widget> children) => pw.Container(
+      width: double.infinity,
+      margin: const pw.EdgeInsets.only(bottom: 7),
+      padding: const pw.EdgeInsets.all(10),
+      decoration: pw.BoxDecoration(
+        color: pd.PdfColors.white,
+        border: pw.Border.all(color: line, width: 0.8),
+        borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5)),
+      ),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: children,
+      ),
+    );
+    String valueOf(Map<String, Object?> row, String key) =>
+        (row[key] ?? '').toString().trim();
+
+    final regularFont = pw.Font.ttf(
+      await rootBundle.load('assets/fonts/Rubik-Regular.ttf'),
+    );
+    final boldFont = pw.Font.ttf(
+      await rootBundle.load('assets/fonts/Rubik-Medium.ttf'),
+    );
     doc.addPage(
       pw.MultiPage(
+        theme: pw.ThemeData.withFont(base: regularFont, bold: boldFont),
+        pageFormat: pd.PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.fromLTRB(38, 62, 38, 54),
+        header: (context) => pw.Container(
+          padding: const pw.EdgeInsets.only(bottom: 6),
+          decoration: const pw.BoxDecoration(
+            border: pw.Border(bottom: pw.BorderSide(color: accent, width: 1.2)),
+          ),
+          child: pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Text(
+                'GOPS  /  FICHE D’INTERVENTION',
+                style: pw.TextStyle(
+                  color: ink,
+                  fontSize: 9,
+                  fontWeight: pw.FontWeight.bold,
+                  letterSpacing: 0.6,
+                ),
+              ),
+              pw.Text(
+                date,
+                style: const pw.TextStyle(
+                  color: pd.PdfColors.grey,
+                  fontSize: 9,
+                ),
+              ),
+            ],
+          ),
+        ),
         build: (context) => [
-          pw.Header(
-            level: 0,
-            child: pw.Text(
-              'GOPS · FICHE INTERVENTION',
-              style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold),
+          pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.only(bottom: 9),
+            decoration: const pw.BoxDecoration(
+              border: pw.Border(bottom: pw.BorderSide(color: line, width: 1)),
+            ),
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text(
+                  'COMPTE RENDU D’INTERVENTION',
+                  style: pw.TextStyle(
+                    color: ink,
+                    fontSize: 19,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                ),
+                if (_controllers['nature']!.text.trim().isNotEmpty) ...[
+                  pw.SizedBox(height: 4),
+                  pw.Text(
+                    _controllers['nature']!.text.trim(),
+                    style: pw.TextStyle(color: accent, fontSize: 12),
+                  ),
+                ],
+              ],
             ),
           ),
           if (included.contains('Informations générales')) ...[
-            pw.Text(
-              'Informations générales',
-              style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.SizedBox(height: 8),
+            sectionTitle('Informations générales'),
             ...info
-                .where((e) => e.$2.trim().isNotEmpty)
-                .map(
-                  (e) => pw.Padding(
-                    padding: const pw.EdgeInsets.only(bottom: 4),
-                    child: pw.Text('${e.$1} : ${e.$2}'),
-                  ),
-                ),
-            pw.SizedBox(height: 16),
+                .where((entry) => entry.$2.trim().isNotEmpty)
+                .map((entry) => detail(entry.$1, entry.$2.trim())),
           ],
           if (included.contains('Identités')) ...[
-            pw.Text(
-              'Identités',
-              style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
-            ),
-            ..._identities.map(
-              (x) => pw.Container(
-                margin: const pw.EdgeInsets.symmetric(vertical: 5),
-                padding: const pw.EdgeInsets.all(8),
-                decoration: pw.BoxDecoration(
-                  border: pw.Border.all(
-                    color: const pd.PdfColor(0.7, 0.7, 0.7),
-                  ),
-                ),
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    pw.Text(
-                      '${x['first_names']} ${x['surname']} · ${x['role']}',
-                      style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+            sectionTitle('Personnes concernées'),
+            if (_identities.isEmpty)
+              pw.Text(
+                'Aucune identité renseignée.',
+                style: const pw.TextStyle(color: pd.PdfColors.grey),
+              )
+            else
+              ..._identities.asMap().entries.map((entry) {
+                final index = entry.key + 1;
+                final person = entry.value;
+                final name =
+                    '${valueOf(person, 'first_names')} ${valueOf(person, 'surname')}'
+                        .trim();
+                final role = valueOf(person, 'role');
+                final heading = [
+                  if (name.isNotEmpty) name,
+                  if (role.isNotEmpty) role,
+                ].join('  ·  ');
+                return card([
+                  pw.Text(
+                    '${index.toString().padLeft(2, '0')}  ${heading.isEmpty ? 'Personne' : heading}',
+                    style: pw.TextStyle(
+                      color: ink,
+                      fontSize: 11,
+                      fontWeight: pw.FontWeight.bold,
                     ),
-                    for (final field in const {
-                      'usage_name': 'Nom d’usage',
-                      'birth_date': 'Date de naissance',
-                      'birth_place': 'Lieu de naissance',
-                      'nationality': 'Nationalité',
-                      'address': 'Adresse',
-                      'postal_code': 'Code postal',
-                      'city': 'Ville',
-                      'phone': 'Téléphone',
-                      'email': 'Adresse électronique',
-                      'observations': 'Observations',
-                    }.entries)
-                      if ((x[field.key] ?? '').toString().trim().isNotEmpty)
-                        pw.Text(
-                          '${field.value} : ${field.key == 'birth_date' ? _displayDate(x[field.key]) : x[field.key]}',
+                  ),
+                  pw.SizedBox(height: 5),
+                  for (final field in const {
+                    'usage_name': 'Nom d’usage',
+                    'birth_date': 'Date de naissance',
+                    'birth_place': 'Lieu de naissance',
+                    'nationality': 'Nationalité',
+                    'address': 'Adresse',
+                    'postal_code': 'Code postal',
+                    'city': 'Ville',
+                    'phone': 'Téléphone',
+                    'email': 'Adresse électronique',
+                    'observations': 'Observations',
+                  }.entries)
+                    if (valueOf(person, field.key).isNotEmpty)
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.only(top: 2),
+                        child: pw.Text(
+                          '${field.value} : ${field.key == 'birth_date' ? _displayDate(person[field.key]) : valueOf(person, field.key)}',
+                          style: const pw.TextStyle(fontSize: 9.5),
                         ),
-                  ],
-                ),
-              ),
-            ),
-            pw.SizedBox(height: 14),
+                      ),
+                ]);
+              }),
           ],
           if (included.contains('Véhicules')) ...[
-            pw.Text(
-              'Véhicules',
-              style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
-            ),
-            ..._vehicles.map(
-              (x) => pw.Container(
-                margin: const pw.EdgeInsets.symmetric(vertical: 5),
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    pw.Text(
-                      '${x['registration']} · ${x['make']} ${x['model']} · ${x['color']} · ${x['country']}',
+            sectionTitle('Véhicules concernés'),
+            if (_vehicles.isEmpty)
+              pw.Text(
+                'Aucun véhicule renseigné.',
+                style: const pw.TextStyle(color: pd.PdfColors.grey),
+              )
+            else
+              ..._vehicles.asMap().entries.map((entry) {
+                final index = entry.key + 1;
+                final vehicle = entry.value;
+                final heading = [
+                  valueOf(vehicle, 'registration'),
+                  valueOf(vehicle, 'make'),
+                  valueOf(vehicle, 'model'),
+                ].where((part) => part.isNotEmpty).join('  ·  ');
+                return card([
+                  pw.Text(
+                    '${index.toString().padLeft(2, '0')}  ${heading.isEmpty ? 'Véhicule' : heading}',
+                    style: pw.TextStyle(
+                      color: ink,
+                      fontSize: 11,
+                      fontWeight: pw.FontWeight.bold,
                     ),
-                    for (final key in ['kind', 'observations'])
-                      if ((x[key] ?? '').toString().trim().isNotEmpty)
-                        pw.Text(
-                          '${key == 'kind' ? 'Type' : 'Observations'} : ${x[key]}',
+                  ),
+                  for (final field in const {
+                    'kind': 'Type',
+                    'color': 'Couleur',
+                    'country': 'Pays',
+                    'observations': 'Observations',
+                  }.entries)
+                    if (valueOf(vehicle, field.key).isNotEmpty)
+                      pw.Padding(
+                        padding: const pw.EdgeInsets.only(top: 3),
+                        child: pw.Text(
+                          '${field.value} : ${valueOf(vehicle, field.key)}',
+                          style: const pw.TextStyle(fontSize: 9.5),
                         ),
-                  ],
-                ),
-              ),
-            ),
-            pw.SizedBox(height: 14),
+                      ),
+                ]);
+              }),
           ],
           if (included.contains('Compte rendu') &&
               _controllers['report']!.text.trim().isNotEmpty) ...[
-            pw.Text(
-              'Compte rendu',
-              style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.SizedBox(height: 8),
-            pw.Text(_controllers['report']!.text),
-          ],
-          for (final item in includedPhotos)
-            pw.Padding(
-              padding: const pw.EdgeInsets.only(top: 10),
-              child: pw.Column(
-                children: [
-                  pw.Image(
-                    pw.MemoryImage(Uint8List.fromList(item.bytes)),
-                    height: 260,
-                    fit: pw.BoxFit.contain,
-                  ),
-                  pw.Text((item.photo['description'] ?? '').toString()),
-                ],
+            sectionTitle('Compte rendu opérationnel'),
+            pw.Container(
+              width: double.infinity,
+              padding: const pw.EdgeInsets.all(12),
+              decoration: pw.BoxDecoration(
+                color: pale,
+                border: pw.Border.all(color: line, width: 0.8),
+                borderRadius: const pw.BorderRadius.all(pw.Radius.circular(5)),
+              ),
+              child: pw.Text(
+                _controllers['report']!.text.trim(),
+                style: const pw.TextStyle(fontSize: 10.5, lineSpacing: 3),
               ),
             ),
-        ],
-        footer: (context) => pw.Row(
-          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-          children: [
-            pw.Text('GOPS · Document local'),
-            pw.Text('Page ${context.pageNumber} / ${context.pagesCount}'),
           ],
+          if (includedPhotos.isNotEmpty) ...[
+            sectionTitle('Photographies'),
+            for (final item in includedPhotos)
+              card([
+                pw.Text(
+                  item.photo['category'] == 'identite'
+                      ? 'Photo d’identité'
+                      : item.photo['category'] == 'vehicule'
+                      ? 'Photo de véhicule'
+                      : 'Photo générale',
+                  style: pw.TextStyle(
+                    color: accent,
+                    fontSize: 9,
+                    fontWeight: pw.FontWeight.bold,
+                  ),
+                ),
+                pw.SizedBox(height: 6),
+                pw.Center(
+                  child: pw.Image(
+                    pw.MemoryImage(Uint8List.fromList(item.bytes)),
+                    height: 280,
+                    fit: pw.BoxFit.contain,
+                  ),
+                ),
+                if ((item.photo['description'] ?? '')
+                    .toString()
+                    .trim()
+                    .isNotEmpty) ...[
+                  pw.SizedBox(height: 5),
+                  pw.Text(
+                    (item.photo['description'] ?? '').toString().trim(),
+                    style: const pw.TextStyle(fontSize: 9),
+                  ),
+                ],
+              ]),
+          ],
+        ],
+        footer: (context) => pw.Container(
+          padding: const pw.EdgeInsets.only(top: 6),
+          decoration: const pw.BoxDecoration(
+            border: pw.Border(top: pw.BorderSide(color: line, width: 0.8)),
+          ),
+          child: pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+              pw.Text(
+                'GOPS  ·  Document généré le ${DateFormat('dd/MM/yyyy').format(DateTime.now())}',
+                style: const pw.TextStyle(
+                  color: pd.PdfColors.grey,
+                  fontSize: 8,
+                ),
+              ),
+              pw.Text(
+                'Page ${context.pageNumber} / ${context.pagesCount}',
+                style: const pw.TextStyle(
+                  color: pd.PdfColors.grey,
+                  fontSize: 8,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
