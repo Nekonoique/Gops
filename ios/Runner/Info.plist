@@ -92,7 +92,7 @@
     <key>NSFaceIDUsageDescription</key>
     <string>GOPS utilise Face ID pour dÃ©verrouiller lâ€™application.</string>
     <key>NSCameraUsageDescription</key>
-    <string>GOPS utilise lâ€™appareil photo pour joindre une photographie Ã  une fiche.</string>
+    <string>GOPS utilise l’appareil photo pour ajouter des photos et scanner les QR codes de fiche.</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>GOPS permet de choisir une photographie Ã  copier dans son stockage privÃ©.</string>
 </dict>

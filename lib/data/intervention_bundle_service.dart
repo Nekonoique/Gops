@@ -16,8 +16,14 @@ class InterventionBundleService {
   static const _format = 'gops-intervention';
   static const _version = 1;
   static const _maxBundleBytes = 256 * 1024 * 1024;
+  static const _qrPrefix = 'GOPSQR1:';
+  // Version 40-L holds at most 2,953 bytes; leave a margin for reader reliability.
+  static const _maxQrCharacters = 2800;
 
-  static Future<Uint8List> exportBundle(String interventionId) async {
+  static Future<Uint8List> exportBundle(
+    String interventionId, {
+    bool includePhotos = true,
+  }) async {
     final db = GopsDatabase.instance;
     final intervention = await db.intervention(interventionId);
     if (intervention == null) {
@@ -36,7 +42,9 @@ class InterventionBundleService {
 
     final archive = Archive();
     final photos = <Map<String, Object?>>[];
-    final sourcePhotos = await db.photos(interventionId);
+    final sourcePhotos = includePhotos
+        ? await db.photos(interventionId)
+        : <Map<String, Object?>>[];
     for (var i = 0; i < sourcePhotos.length; i++) {
       final photo = sourcePhotos[i];
       final filename = 'photos/photo_${i + 1}.jpg';
@@ -61,6 +69,7 @@ class InterventionBundleService {
       'format': _format,
       'version': _version,
       'exported_at': DateTime.now().toIso8601String(),
+      'photos_omitted': !includePhotos,
       'intervention': {
         for (final key in [
           'reference',
@@ -88,6 +97,29 @@ class InterventionBundleService {
     );
     final encoded = ZipEncoder().encode(archive);
     return Uint8List.fromList(encoded);
+  }
+
+  static Future<String> exportQrPayload(String interventionId) async {
+    final bundle = await exportBundle(interventionId, includePhotos: false);
+    final payload = '$_qrPrefix${base64Url.encode(bundle).replaceAll('=', '')}';
+    if (payload.length > _maxQrCharacters) {
+      throw const FormatException(
+        'Cette fiche contient trop de données pour un QR code. Utilisez l’envoi du fichier.',
+      );
+    }
+    return payload;
+  }
+
+  static Future<String> importQrPayload(String payload) async {
+    if (!payload.startsWith(_qrPrefix) || payload.length > _maxQrCharacters) {
+      throw const FormatException(
+        'Ce QR code n’est pas une fiche GOPS valide.',
+      );
+    }
+    final encoded = payload.substring(_qrPrefix.length);
+    final normalized = base64Url.normalize(encoded);
+    final bundle = Uint8List.fromList(base64Url.decode(normalized));
+    return importBundle(bundle);
   }
 
   static Map<String, Object?> _withoutInterventionId(

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -15,6 +16,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:pdf/pdf.dart' as pd;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:mobile_scanner/mobile_scanner.dart' hide Email;
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'data/database.dart';
@@ -439,22 +442,58 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _importIntervention() async {
     try {
-      final picked = await FilePicker.pickFile(
-        dialogTitle: 'Importer une fiche GOPS',
-        // iOS Files greys out custom .gops files because they have no system UTI.
-        // Accept any file here; the bundle service validates its actual contents.
-        type: FileType.any,
+      final method = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Importer une fiche'),
+          content: const Text('Choisissez comment recevoir la fiche GOPS.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Annuler'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, 'qr'),
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scanner un QR code'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.pop(dialogContext, 'file'),
+              icon: const Icon(Icons.folder_open_outlined),
+              label: const Text('Choisir un fichier'),
+            ),
+          ],
+        ),
       );
-      if (picked == null) return;
-      final bundleSize = await picked.length();
-      if (bundleSize != null && bundleSize > 256 * 1024 * 1024) {
-        throw const FormatException(
-          'Le fichier GOPS dépasse la taille maximale de 256 Mo.',
+      if (method == null) return;
+      if (!mounted) return;
+      late final String id;
+      if (method == 'qr') {
+        final payload = await Navigator.push<String>(
+          context,
+          MaterialPageRoute(builder: (_) => const QrScanPage()),
+        );
+        if (payload == null) return;
+        if (!mounted) return;
+        id = await InterventionBundleService.importQrPayload(payload);
+      } else {
+        final picked = await FilePicker.pickFile(
+          dialogTitle: 'Importer une fiche GOPS',
+          // iOS Files does not recognize the custom .gops extension on every
+          // provider. Accept any file; the bundle service validates contents.
+          type: FileType.any,
+        );
+        if (picked == null) return;
+        final bundleSize = await picked.length();
+        if (bundleSize != null && bundleSize > 256 * 1024 * 1024) {
+          throw const FormatException(
+            'Le fichier GOPS dépasse la taille maximale de 256 Mo.',
+          );
+        }
+        id = await InterventionBundleService.importBundle(
+          await picked.readAsBytes(),
         );
       }
-      final id = await InterventionBundleService.importBundle(
-        await picked.readAsBytes(),
-      );
       if (!mounted) return;
       widget.onActivity();
       ScaffoldMessenger.of(
@@ -616,6 +655,109 @@ class _HomePageState extends State<HomePage> {
                 ),
               );
             },
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class QrDisplayPage extends StatelessWidget {
+  const QrDisplayPage({required this.payload, super.key});
+
+  final String payload;
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Fiche GOPS à scanner')),
+    body: SafeArea(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final qrSize = math
+              .min(constraints.maxWidth - 24, constraints.maxHeight - 150)
+              .clamp(160.0, 1000.0)
+              .toDouble();
+          return Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 8, 20, 4),
+                child: Text(
+                  'Sur l’autre téléphone, ouvrez GOPS puis Importer une fiche → Scanner un QR code.',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Expanded(
+                child: Center(
+                  child: Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.all(8),
+                    child: QrImageView(
+                      data: payload,
+                      version: QrVersions.auto,
+                      size: qrSize,
+                      errorCorrectionLevel: QrErrorCorrectLevel.L,
+                      semanticsLabel: 'QR code de transfert de fiche GOPS',
+                    ),
+                  ),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 4, 20, 16),
+                child: Text(
+                  'Les photos ne sont pas incluses. Pour les transférer, envoyez le fichier complet.',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    ),
+  );
+}
+
+class QrScanPage extends StatefulWidget {
+  const QrScanPage({super.key});
+
+  @override
+  State<QrScanPage> createState() => _QrScanPageState();
+}
+
+class _QrScanPageState extends State<QrScanPage> {
+  bool _handled = false;
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_handled || !mounted) return;
+    for (final barcode in capture.barcodes) {
+      final value = barcode.rawValue;
+      if (value != null && value.startsWith('GOPSQR1:')) {
+        _handled = true;
+        Navigator.of(context).pop(value);
+        return;
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Scanner une fiche GOPS')),
+    body: Stack(
+      fit: StackFit.expand,
+      children: [
+        MobileScanner(onDetect: _onDetect),
+        Align(
+          alignment: Alignment.bottomCenter,
+          child: Container(
+            margin: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.72),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Text(
+              'Placez le QR code affiché par GOPS dans le cadre.',
+              textAlign: TextAlign.center,
+            ),
           ),
         ),
       ],
@@ -948,8 +1090,8 @@ class _InterventionEditorState extends State<InterventionEditor>
           icon: const Icon(Icons.picture_as_pdf_outlined),
         ),
         IconButton(
-          tooltip: 'Partager la fiche GOPS',
-          onPressed: _shareIntervention,
+          tooltip: 'Exporter la fiche GOPS',
+          onPressed: _exportIntervention,
           icon: const Icon(Icons.ios_share_outlined),
         ),
         IconButton(
@@ -1998,6 +2140,68 @@ class _InterventionEditorState extends State<InterventionEditor>
       return;
     await GopsDatabase.instance.deleteIntervention(_id!);
     if (mounted) Navigator.pop(context);
+  }
+
+  Future<void> _exportIntervention() async {
+    await _save();
+    if (!mounted) return;
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Exporter la fiche'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.share_outlined),
+              title: const Text('Envoyer le fichier'),
+              subtitle: const Text('Fiche complète avec les photos'),
+              onTap: () => Navigator.pop(dialogContext, 'file'),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.qr_code_2),
+              title: const Text('Afficher un QR code'),
+              subtitle: const Text('Fiche sans les photos'),
+              onTap: () => Navigator.pop(dialogContext, 'qr'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Annuler'),
+          ),
+        ],
+      ),
+    );
+    if (choice == 'file') {
+      await _shareIntervention();
+    } else if (choice == 'qr') {
+      await _showInterventionQr();
+    }
+  }
+
+  Future<void> _showInterventionQr() async {
+    if (!await _confirm(
+      'Le QR code contient les informations de la fiche et pourra être lu par les personnes qui le voient. Les photos ne sont pas incluses. Continuer ?',
+    )) {
+      return;
+    }
+    try {
+      final payload = await InterventionBundleService.exportQrPayload(_id!);
+      if (!mounted) return;
+      await Navigator.of(context).push<void>(
+        MaterialPageRoute(builder: (_) => QrDisplayPage(payload: payload)),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('QR code impossible à créer : $error')),
+        );
+      }
+    }
   }
 
   Future<void> _shareIntervention() async {
