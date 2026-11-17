@@ -441,8 +441,9 @@ class _HomePageState extends State<HomePage> {
     try {
       final picked = await FilePicker.pickFile(
         dialogTitle: 'Importer une fiche GOPS',
-        type: FileType.custom,
-        allowedExtensions: const ['gops'],
+        // iOS Files greys out custom .gops files because they have no system UTI.
+        // Accept any file here; the bundle service validates its actual contents.
+        type: FileType.any,
       );
       if (picked == null) return;
       final bundleSize = await picked.length();
