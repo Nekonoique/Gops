@@ -79,6 +79,8 @@ class InterventionBundleService {
           'nature',
           'observations',
           'report',
+          'intervention_type',
+          'tcpm_data',
           'created_at',
           'updated_at',
         ])
@@ -215,6 +217,8 @@ class InterventionBundleService {
           'nature': intervention['nature'] ?? '',
           'observations': intervention['observations'] ?? '',
           'report': intervention['report'] ?? '',
+          'intervention_type': intervention['intervention_type'] ?? 'libre',
+          'tcpm_data': intervention['tcpm_data'] ?? '{}',
           'created_at': now.toIso8601String(),
           'updated_at': now.toIso8601String(),
         });

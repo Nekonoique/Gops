@@ -47,13 +47,14 @@ class GopsDatabase {
     final database = await openDatabase(
       p.join(directory.path, 'gops.sqlite'),
       password: key,
-      version: 1,
+      version: 2,
       onConfigure: (db) async => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: (db, version) async {
         await db.execute('''CREATE TABLE interventions (
           id TEXT PRIMARY KEY, reference TEXT NOT NULL, date TEXT NOT NULL,
           time TEXT NOT NULL, location TEXT NOT NULL DEFAULT '', nature TEXT NOT NULL DEFAULT '',
           report TEXT NOT NULL DEFAULT '', observations TEXT NOT NULL DEFAULT '',
+          intervention_type TEXT NOT NULL DEFAULT 'libre', tcpm_data TEXT NOT NULL DEFAULT '{}',
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''');
         await db.execute('''CREATE TABLE identities (
           id TEXT PRIMARY KEY, intervention_id TEXT NOT NULL REFERENCES interventions(id) ON DELETE CASCADE,
@@ -86,6 +87,12 @@ class GopsDatabase {
         await db.execute(
           'CREATE INDEX idx_vehicle_intervention ON vehicles(intervention_id)',
         );
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute("ALTER TABLE interventions ADD COLUMN intervention_type TEXT NOT NULL DEFAULT 'libre'");
+          await db.execute("ALTER TABLE interventions ADD COLUMN tcpm_data TEXT NOT NULL DEFAULT '{}'");
+        }
       },
     );
     _database = database;

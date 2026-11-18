@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_email_sender/flutter_email_sender.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -198,17 +200,19 @@ class _GopsAppState extends State<GopsApp> with WidgetsBindingObserver {
         : FutureBuilder<bool>(
             future: SecurityService.instance.hasPin,
             builder: (context, snapshot) {
-              if (!snapshot.hasData)
+              if (!snapshot.hasData) {
                 return const Scaffold(
                   body: Center(child: CircularProgressIndicator()),
                 );
-              if (!snapshot.data!)
+              }
+              if (!snapshot.data!) {
                 return PinSetup(
                   onCreated: () => setState(() {
                     _locked = false;
                     touch();
                   }),
                 );
+              }
               return _locked
                   ? PinUnlock(
                       onUnlocked: () => setState(() {
@@ -345,7 +349,7 @@ class _PinUnlockState extends State<PinUnlock> {
   Future<void> _tryPin() async {
     setState(() => _busy = true);
     final failures = await SecurityService.instance.failedAttempts();
-    final wait = failures < 3 ? 0 : (1 << ((failures - 3).clamp(0, 8) as int));
+    final wait = failures < 3 ? 0 : (1 << (failures - 3).clamp(0, 8));
     if (wait > 0) await Future<void>.delayed(Duration(seconds: wait));
     if (await SecurityService.instance.verifyPin(_pin.text)) {
       await SecurityService.instance.resetFailures();
@@ -358,8 +362,9 @@ class _PinUnlockState extends State<PinUnlock> {
   }
 
   Future<void> _biometric() async {
-    if (await SecurityService.instance.authenticateBiometrically())
+    if (await SecurityService.instance.authenticateBiometrically()) {
       widget.onUnlocked();
+    }
   }
 
   @override
@@ -440,6 +445,19 @@ class _HomePageState extends State<HomePage> {
       GopsDatabase.instance.interventions(query: _query);
   Future<void> _refresh() async => setState(() {});
 
+  String _cityForList(Object? location) {
+    final address = (location ?? '').toString().trim();
+    if (address.isEmpty) return 'Ville non renseignée';
+    final postalCity = RegExp(r'\b\d{5}\s+(.+)$').firstMatch(address);
+    if (postalCity != null) return postalCity.group(1)!.trim();
+    final parts = address
+        .split(RegExp(r'[,;]'))
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty)
+        .toList();
+    return parts.length > 1 ? parts.last : address;
+  }
+
   Future<void> _importIntervention() async {
     try {
       final method = await showDialog<String>(
@@ -496,6 +514,8 @@ class _HomePageState extends State<HomePage> {
       }
       if (!mounted) return;
       widget.onActivity();
+      final imported = await GopsDatabase.instance.intervention(id);
+      final importedType = (imported?['intervention_type'] ?? 'libre').toString();
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('Fiche importée.')));
@@ -504,6 +524,7 @@ class _HomePageState extends State<HomePage> {
         MaterialPageRoute(
           builder: (_) => InterventionEditor(
             id: id,
+            initialType: importedType,
             onSaved: _refresh,
             onLock: widget.onLock,
           ),
@@ -562,10 +583,21 @@ class _HomePageState extends State<HomePage> {
     floatingActionButton: FloatingActionButton.extended(
       onPressed: () async {
         widget.onActivity();
+        final type = await showDialog<String>(
+          context: context,
+          builder: (c) => AlertDialog(
+            title: const Text('Type de fiche'),
+            content: Column(mainAxisSize: MainAxisSize.min, children: [
+              ListTile(title: const Text('Fiche libre'), subtitle: const Text('Formulaire habituel'), onTap: () => Navigator.pop(c, 'libre')),
+              ListTile(title: const Text('Fiche TCMP'), subtitle: const Text('Constatations après cambriolage'), onTap: () => Navigator.pop(c, 'tcmp')),
+            ]),
+          ),
+        );
+        if (type == null || !mounted) return;
         await Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => InterventionEditor(onSaved: _refresh),
+            builder: (_) => InterventionEditor(onSaved: _refresh, initialType: type),
           ),
         );
         _refresh();
@@ -593,11 +625,13 @@ class _HomePageState extends State<HomePage> {
           child: FutureBuilder<List<Map<String, Object?>>>(
             future: _load(),
             builder: (context, snapshot) {
-              if (!snapshot.hasData)
+              if (!snapshot.hasData) {
                 return const Center(child: CircularProgressIndicator());
+              }
               final rows = snapshot.data!;
-              if (rows.isEmpty)
+              if (rows.isEmpty) {
                 return EmptyState(isSearching: _query.isNotEmpty);
+              }
               return RefreshIndicator(
                 onRefresh: () async => _refresh(),
                 child: ListView.builder(
@@ -606,6 +640,9 @@ class _HomePageState extends State<HomePage> {
                   itemBuilder: (context, index) {
                     final row = rows[index];
                     final nature = (row['nature'] as String? ?? '').trim();
+                    final isTcpm =
+                        (row['intervention_type'] ?? 'libre').toString() ==
+                        'tcmp';
                     return Card(
                       child: ListTile(
                         contentPadding: const EdgeInsets.symmetric(
@@ -613,7 +650,9 @@ class _HomePageState extends State<HomePage> {
                           vertical: 10,
                         ),
                         title: Text(
-                          nature.isEmpty
+                          isTcpm
+                              ? 'Cambriolage - ${_cityForList(row['location'])}'
+                              : nature.isEmpty
                               ? 'Intervention sans intitulé'
                               : nature,
                           style: const TextStyle(fontWeight: FontWeight.bold),
@@ -624,13 +663,17 @@ class _HomePageState extends State<HomePage> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                '${_displayDate(row['date'])} · ${row['time']} · ${row['location']}',
+                                isTcpm
+                                    ? '${_displayDate(row['date'])} · ${row['time']}'
+                                    : '${_displayDate(row['date'])} · ${row['time']} · ${row['location']}',
                               ),
-                              const SizedBox(height: 8),
-                              Text(
-                                '${row['identity_count']} identité(s)  ·  ${row['vehicle_count']} véhicule(s)  ·  ${row['photo_count']} photo(s)',
-                                style: const TextStyle(color: Colors.white60),
-                              ),
+                              if (!isTcpm) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  '${row['identity_count']} identité(s)  ·  ${row['vehicle_count']} véhicule(s)  ·  ${row['photo_count']} photo(s)',
+                                  style: const TextStyle(color: Colors.white60),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -642,6 +685,7 @@ class _HomePageState extends State<HomePage> {
                             MaterialPageRoute(
                               builder: (_) => InterventionEditor(
                                 id: row['id']! as String,
+                                initialType: (row['intervention_type'] ?? 'libre').toString(),
                                 onSaved: _refresh,
                                 onLock: widget.onLock,
                               ),
@@ -797,11 +841,13 @@ class EmptyState extends StatelessWidget {
 class InterventionEditor extends StatefulWidget {
   const InterventionEditor({
     this.id,
+    this.initialType = 'libre',
     required this.onSaved,
     this.onLock,
     super.key,
   });
   final String? id;
+  final String initialType;
   final VoidCallback onSaved;
   final VoidCallback? onLock;
   @override
@@ -812,10 +858,13 @@ class _InterventionEditorState extends State<InterventionEditor>
     with SingleTickerProviderStateMixin {
   final _form = GlobalKey<FormState>();
   final _controllers = <String, TextEditingController>{};
+  final _tcpmControllers = <String, TextEditingController>{};
   final _picker = ImagePicker();
-  late final TabController _tabs;
+  late TabController _tabs;
   Timer? _debounce;
   String? _id;
+  late String _type = widget.initialType;
+  final Map<String, dynamic> _tcpm = {};
   String _saveState = 'Chargement…';
   bool _loading = true;
   bool _sendingPhotos = false;
@@ -833,7 +882,7 @@ class _InterventionEditorState extends State<InterventionEditor>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 5, vsync: this);
+    _tabs = TabController(length: widget.initialType == 'tcmp' ? 7 : 5, vsync: this);
     for (final f in _fields) {
       _controllers[f] = TextEditingController()..addListener(_scheduleSave);
     }
@@ -845,6 +894,9 @@ class _InterventionEditorState extends State<InterventionEditor>
     _debounce?.cancel();
     _tabs.dispose();
     for (final c in _controllers.values) {
+      c.dispose();
+    }
+    for (final c in _tcpmControllers.values) {
       c.dispose();
     }
     super.dispose();
@@ -870,6 +922,24 @@ class _InterventionEditorState extends State<InterventionEditor>
           'report': '',
           'created_at': now.toIso8601String(),
         };
+    _type = (values['intervention_type'] ?? widget.initialType).toString();
+    try {
+      final decoded = jsonDecode((values['tcpm_data'] ?? '{}').toString());
+      if (decoded is Map<String, dynamic>) _tcpm.addAll(decoded);
+    } catch (_) {}
+    if (_type == 'tcmp' && _tcpm['form_version'] != 2) {
+      final present = (_tcpm['present_people'] as List?) ?? [];
+      _tcpm['present_people'] = present.map((entry) {
+        final row = Map<String, dynamic>.from(entry as Map);
+        return {'0': row['0'] ?? '', '6': row['1'] ?? ''};
+      }).toList();
+      final neighbors = (_tcpm['neighbors'] as List?) ?? [];
+      _tcpm['neighbors'] = neighbors.map((entry) {
+        final row = Map<String, dynamic>.from(entry as Map);
+        return {'0': row['0'] ?? '', '4': row['1'] ?? ''};
+      }).toList();
+      _tcpm['form_version'] = 2;
+    }
     _id ??= values['id'] as String;
     for (final f in _fields) {
       _controllers[f]!.text = f == 'date'
@@ -877,11 +947,12 @@ class _InterventionEditorState extends State<InterventionEditor>
           : (values[f] ?? '').toString();
     }
     await _reloadChildren();
-    if (mounted)
+    if (mounted) {
       setState(() {
         _loading = false;
         _saveState = data == null ? 'Nouveau brouillon' : 'Enregistré';
       });
+    }
     if (data == null) await _save();
   }
 
@@ -913,6 +984,8 @@ class _InterventionEditorState extends State<InterventionEditor>
         'nature': _controllers['nature']!.text.trim(),
         'observations': _controllers['observations']!.text.trim(),
         'report': _controllers['report']!.text,
+        'intervention_type': _type,
+        'tcpm_data': jsonEncode(_tcpm),
         'created_at': existing?['created_at'] ?? now,
         'updated_at': now,
       });
@@ -954,8 +1027,9 @@ class _InterventionEditorState extends State<InterventionEditor>
       if (picked == null) return;
       final bytes = await picked.readAsBytes();
       final decoded = img.decodeImage(bytes);
-      if (decoded == null)
+      if (decoded == null) {
         throw const FormatException('Format d’image non reconnu.');
+      }
       decoded.exif = img.ExifData();
       decoded.iccProfile = null;
       decoded.textData = null;
@@ -970,7 +1044,7 @@ class _InterventionEditorState extends State<InterventionEditor>
       final file = File(p.join(folder.path, filename));
       await file.writeAsBytes(clean, flush: true);
       final description = TextEditingController();
-      if (mounted)
+      if (mounted) {
         await showDialog<void>(
           context: context,
           builder: (c) => AlertDialog(
@@ -991,6 +1065,7 @@ class _InterventionEditorState extends State<InterventionEditor>
             ],
           ),
         );
+      }
       await GopsDatabase.instance.saveRow('photos', {
         'id': filename,
         'intervention_id': _id,
@@ -1008,10 +1083,11 @@ class _InterventionEditorState extends State<InterventionEditor>
       description.dispose();
       await _reloadChildren();
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Photo non ajoutée : $e')));
+      }
     }
   }
 
@@ -1103,13 +1179,23 @@ class _InterventionEditorState extends State<InterventionEditor>
       bottom: TabBar(
         controller: _tabs,
         isScrollable: true,
-        tabs: const [
-          Tab(text: 'Général'),
-          Tab(text: 'Identités'),
-          Tab(text: 'Véhicules'),
-          Tab(text: 'Photos'),
-          Tab(text: 'Compte rendu'),
-        ],
+        tabs: _type == 'tcmp'
+            ? const [
+                Tab(text: 'Saisine'),
+                Tab(text: 'Situation'),
+                Tab(text: 'Mesures'),
+                Tab(text: 'État des lieux'),
+                Tab(text: 'Corps du délit'),
+                Tab(text: 'Mesures diverses'),
+                Tab(text: 'Photos'),
+              ]
+            : const [
+                Tab(text: 'Général'),
+                Tab(text: 'Identités'),
+                Tab(text: 'Véhicules'),
+                Tab(text: 'Photos'),
+                Tab(text: 'Compte rendu'),
+              ],
       ),
     ),
     body: _loading
@@ -1120,11 +1206,21 @@ class _InterventionEditorState extends State<InterventionEditor>
                 child: TabBarView(
                   controller: _tabs,
                   children: [
-                    _general(),
-                    _identitySection(),
-                    _vehicleSection(),
-                    _photoSection(),
-                    _reportSection(),
+                    if (_type == 'tcmp') ...[
+                      _tcpmSaisine(),
+                      _tcpmSituation(),
+                      _tcpmMeasures(),
+                      _tcpmPlaces(),
+                      _tcpmBody(),
+                      _tcpmMisc(),
+                      _photoSection(),
+                    ] else ...[
+                      _general(),
+                      _identitySection(),
+                      _vehicleSection(),
+                      _photoSection(),
+                      _reportSection(),
+                    ],
                   ],
                 ),
               ),
@@ -1200,6 +1296,217 @@ class _InterventionEditorState extends State<InterventionEditor>
       ),
     ],
   );
+  void _setTcpm(String key, Object? value) {
+    _tcpm[key] = value;
+    final controller = _tcpmControllers[key];
+    if (controller != null && controller.text != (value ?? '').toString()) {
+      controller.text = (value ?? '').toString();
+    }
+    _scheduleSave();
+  }
+
+  Widget _tcpmText(String key, String label, {int lines = 1}) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: TextField(
+      controller: _tcpmControllers.putIfAbsent(key, () => TextEditingController(text: (_tcpm[key] ?? '').toString())),
+      maxLines: lines,
+      onChanged: (v) => _setTcpm(key, v),
+      decoration: InputDecoration(labelText: label),
+    ),
+  );
+
+  Widget _tcpmDate(String key, String label) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: TextField(
+      controller: _tcpmControllers.putIfAbsent(key, () => TextEditingController(text: (_tcpm[key] ?? '').toString())),
+      readOnly: true,
+      decoration: InputDecoration(labelText: label, suffixIcon: const Icon(Icons.calendar_today_outlined)),
+      onTap: () async {
+        final current = _parseDate((_tcpm[key] ?? '').toString()) ?? DateTime.now();
+        final date = await showDatePicker(context: context, initialDate: current, firstDate: DateTime(1900), lastDate: DateTime(2100));
+        if (date != null) _setTcpm(key, DateFormat('dd/MM/yyyy').format(date));
+      },
+    ),
+  );
+
+  Widget _tcpmTime(String key, String label) => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: TextField(
+      controller: _tcpmControllers.putIfAbsent(key, () => TextEditingController(text: (_tcpm[key] ?? '').toString())),
+      readOnly: true,
+      decoration: InputDecoration(labelText: label, suffixIcon: const Icon(Icons.access_time)),
+      onTap: () async {
+        final parts = (_tcpm[key] ?? '').toString().split(':');
+        final hour = parts.length == 2 ? int.tryParse(parts[0]) : null;
+        final minute = parts.length == 2 ? int.tryParse(parts[1]) : null;
+        final time = await showTimePicker(context: context, initialTime: TimeOfDay(hour: hour != null && hour < 24 ? hour : TimeOfDay.now().hour, minute: minute != null && minute < 60 ? minute : 0));
+        if (time != null) _setTcpm(key, '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}');
+      },
+    ),
+  );
+
+  Widget _tcpmSaisine() => ListView(padding: const EdgeInsets.fromLTRB(16, 24, 16, 16), children: [
+    _tcpmDate('engagement_date', 'Date d’engagement'),
+    _tcpmTime('engagement_time', 'Heure d’engagement'),
+    _field('location', 'Adresse des faits'),
+    const Padding(
+      padding: EdgeInsets.only(top: 4, bottom: 12),
+      child: Text('Gendarmes présents dans la patrouille', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+    ),
+    _tcpmPeople('gendarmes', fields: const ['Grade', 'Nom', 'Statut judiciaire (APJ, APJA, OPJ)']),
+  ]);
+
+  Widget _tcpmSituation() => ListView(padding: const EdgeInsets.fromLTRB(16, 24, 16, 16), children: [
+    _tcpmTime('arrival_time', 'Heure d’arrivée sur place'),
+    const Padding(
+      padding: EdgeInsets.only(top: 4, bottom: 12),
+      child: Text('Personnes présentes', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+    ),
+    _tcpmPeople('present_people', fields: const ['Nom', 'Prénom', 'Date de naissance', 'Lieu de naissance', 'Adresse', 'Téléphone', 'Rôle']),
+    _tcpmText('first_information', 'Premiers renseignements recueillis', lines: 5),
+  ]);
+
+  Widget _tcpmMeasures() => ListView(padding: const EdgeInsets.fromLTRB(16, 24, 16, 16), children: [
+    _tcpmYesNo('photos_taken', 'Réalisation de clichés photographiques des lieux'),
+    _tcpmYesNo('pts_done', 'PTS effectués'),
+    if (_tcpm['pts_done'] == true) _tcpmResult(),
+    _tcpmYesNo('forced_entry_traces', 'Traces d’effraction'),
+  ]);
+
+  Widget _tcpmPlaces() => ListView(padding: const EdgeInsets.fromLTRB(16, 24, 16, 16), children: [
+    const Text('État des lieux', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+    const SizedBox(height: 8),
+    Text('Adresse : ${_controllers['location']!.text}'),
+    const SizedBox(height: 12),
+    _tcpmText('place_state', 'Description de l’état des lieux', lines: 6),
+  ]);
+
+  Widget _tcpmBody() => ListView(padding: const EdgeInsets.fromLTRB(16, 24, 16, 16), children: [
+    _tcpmText('corps_delit', 'CORPS DU DÉLIT', lines: 8),
+  ]);
+
+  Widget _tcpmMisc() => ListView(padding: const EdgeInsets.fromLTRB(16, 24, 16, 16), children: [
+    const Padding(
+      padding: EdgeInsets.only(bottom: 12),
+      child: Text('MESURES DIVERSES', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+    ),
+    _tcpmYesNo('complaint_invitation', 'Victime invitée à déposer plainte à la brigade'),
+    _tcpmText('brigade', 'Brigade concernée'),
+    _tcpmYesNo('neighborhood_inquiry', 'Enquête de voisinage réalisée'),
+    if (_tcpm['neighborhood_inquiry'] == true) ...[
+      const Text('Voisins rencontrés et renseignements recueillis'),
+      _tcpmPeople('neighbors', fields: const ['Nom', 'Prénom', 'Téléphone', 'Adresse', 'Ce qu’il a vu / entendu']),
+    ],
+  ]);
+
+  Widget _tcpmResult() => Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: DropdownButtonFormField<String>(
+      initialValue: const ['Concluant', 'Non concluant'].contains(_tcpm['pts_conclusion']) ? _tcpm['pts_conclusion'] as String : null,
+      decoration: const InputDecoration(labelText: 'Résultat des PTS'),
+      items: const ['Concluant', 'Non concluant'].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+      onChanged: (v) => _setTcpm('pts_conclusion', v),
+    ),
+  );
+
+  Widget _tcpmYesNo(String key, String label) => SwitchListTile(
+    contentPadding: EdgeInsets.zero,
+    title: Text(label),
+    subtitle: Text(_tcpm[key] == null ? 'Non renseigné' : (_tcpm[key] == true ? 'Oui' : 'Non')),
+    value: _tcpm[key] == true,
+    onChanged: (v) => setState(() => _setTcpm(key, v)),
+  );
+
+  Widget _tcpmPeople(String key, {required List<String> fields}) {
+    final rows = ((_tcpm[key] as List?) ?? []).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    Widget personField(int rowIndex, int fieldIndex) {
+      final row = rows[rowIndex];
+      final fieldKey = fieldIndex.toString();
+      if (key == 'gendarmes' && fieldIndex == 2) {
+        return DropdownButtonFormField<String>(
+          initialValue: const ['APJ', 'APJA', 'OPJ'].contains(row[fieldKey])
+              ? row[fieldKey] as String
+              : null,
+          decoration: InputDecoration(labelText: fields[fieldIndex]),
+          items: const ['APJ', 'APJA', 'OPJ']
+              .map((value) => DropdownMenuItem(value: value, child: Text(value)))
+              .toList(),
+          onChanged: (value) {
+            row[fieldKey] = value ?? '';
+            _setTcpm(key, rows);
+          },
+        );
+      }
+      if (key == 'present_people' && fieldIndex == 6) {
+        return DropdownButtonFormField<String>(
+          initialValue:
+              const ['Propriétaire', 'Voisin', 'Famille', 'Autre'].contains(
+                row[fieldKey],
+              )
+              ? row[fieldKey] as String
+              : null,
+          decoration: InputDecoration(labelText: fields[fieldIndex]),
+          items: const ['Propriétaire', 'Voisin', 'Famille', 'Autre']
+              .map((value) => DropdownMenuItem(value: value, child: Text(value)))
+              .toList(),
+          onChanged: (value) {
+            row[fieldKey] = value ?? '';
+            _setTcpm(key, rows);
+          },
+        );
+      }
+      return TextField(
+        controller: _tcpmControllers.putIfAbsent(
+          '$key-$rowIndex-$fieldIndex',
+          () => TextEditingController(text: (row[fieldKey] ?? '').toString()),
+        ),
+        onChanged: (value) {
+          row[fieldKey] = value;
+          _setTcpm(key, rows);
+        },
+        decoration: InputDecoration(labelText: fields[fieldIndex]),
+      );
+    }
+
+    return Column(
+      children: [
+        for (var i = 0; i < rows.length; i++)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                children: [
+                  for (var j = 0; j < fields.length; j++)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: personField(i, j),
+                    ),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      onPressed: () => setState(() {
+                        rows.removeAt(i);
+                        _setTcpm(key, rows);
+                      }),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        OutlinedButton.icon(
+          onPressed: () => setState(() {
+            rows.add({});
+            _setTcpm(key, rows);
+          }),
+          icon: const Icon(Icons.add),
+          label: const Text('Ajouter'),
+        ),
+      ],
+    );
+  }
+
   Future<void> _pickDate() async {
     final current = _parseDate(_controllers['date']!.text) ?? DateTime.now();
     final selected = await showDatePicker(
@@ -1282,7 +1589,7 @@ class _InterventionEditorState extends State<InterventionEditor>
     children: [
       Expanded(
         child: rows.isEmpty
-            ? Center(child: Text('Aucun élément dans cette rubrique.'))
+            ? const Center(child: Text('Aucun élément dans cette rubrique.'))
             : ListView.builder(
                 padding: const EdgeInsets.all(12),
                 itemCount: rows.length,
@@ -1306,7 +1613,7 @@ class _InterventionEditorState extends State<InterventionEditor>
                       trailing: PopupMenuButton<String>(
                         onSelected: (action) {
                           if (action == 'edit') edit(row);
-                          if (action == 'photo')
+                          if (action == 'photo') {
                             _addPhoto(
                               identityId: isIdentity
                                   ? row['id']! as String
@@ -1315,11 +1622,13 @@ class _InterventionEditorState extends State<InterventionEditor>
                                   ? null
                                   : row['id']! as String,
                             );
-                          if (action == 'delete')
+                          }
+                          if (action == 'delete') {
                             _deleteRecord(
                               isIdentity ? 'identities' : 'vehicles',
                               row,
                             );
+                          }
                         },
                         itemBuilder: (c) => const [
                           PopupMenuItem(value: 'edit', child: Text('Modifier')),
@@ -1403,8 +1712,9 @@ class _InterventionEditorState extends State<InterventionEditor>
         row?['id'] as String? ??
         DateTime.now().microsecondsSinceEpoch.toString();
     final linked = <String>{};
-    if (!identity && row != null)
+    if (!identity && row != null) {
       linked.addAll(await GopsDatabase.instance.vehicleIdentityIds(vehicleId));
+    }
     final result = await showDialog<String>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -1443,7 +1753,7 @@ class _InterventionEditorState extends State<InterventionEditor>
                       ),
                   if (identity)
                     DropdownButtonFormField<String>(
-                      value: role,
+                      initialValue: role,
                       decoration: const InputDecoration(labelText: 'Qualité'),
                       items:
                           const [
@@ -1506,18 +1816,22 @@ class _InterventionEditorState extends State<InterventionEditor>
             : vehicleId,
         'intervention_id': _id,
       };
-      for (final entry in controllers.entries)
+      for (final entry in controllers.entries) {
         values[entry.key] = entry.value.text.trim();
+      }
       if (identity) values['role'] = role;
       await GopsDatabase.instance.saveRow(table, values);
-      if (!identity)
+      if (!identity) {
         await GopsDatabase.instance.replaceVehicleIdentityLinks(
           vehicleId,
           linked,
         );
+      }
       await _reloadChildren();
     }
-    for (final c in controllers.values) c.dispose();
+    for (final c in controllers.values) {
+      c.dispose();
+    }
   }
 
   Future<void> _pickRecordDate(
@@ -1561,10 +1875,11 @@ class _InterventionEditorState extends State<InterventionEditor>
       temp = await Directory.systemTemp.createTemp('gops_mail_');
       final attachments = <File>[];
       for (var i = 0; i < _photos.length; i++) {
-        if (mounted)
+        if (mounted) {
           setState(
             () => _saveState = 'Préparation ${i + 1}/${_photos.length}…',
           );
+        }
         final source = File(_photos[i]['local_path']! as String);
         final reduced = await compute(
           _compressPhotoForEmail,
@@ -1611,8 +1926,9 @@ class _InterventionEditorState extends State<InterventionEditor>
           ),
         );
         if (result == EmailSendResult.cancelled ||
-            result == EmailSendResult.saved)
+            result == EmailSendResult.saved) {
           break;
+        }
         if (result == EmailSendResult.unknown && i + 1 < batches.length) {
           if (!await _confirmNextPhotoEmail(i + 2, batches.length)) break;
         }
@@ -1622,13 +1938,15 @@ class _InterventionEditorState extends State<InterventionEditor>
         'Préparation ou ouverture du mail impossible : $e',
       );
     } finally {
-      if (temp != null && await temp.exists())
+      if (temp != null && await temp.exists()) {
         await temp.delete(recursive: true);
-      if (mounted)
+      }
+      if (mounted) {
         setState(() {
           _sendingPhotos = false;
           _saveState = 'Enregistré';
         });
+      }
     }
   }
 
@@ -1664,8 +1982,9 @@ class _InterventionEditorState extends State<InterventionEditor>
               final value = controller.text.trim();
               if (!value.contains('@') ||
                   value.endsWith('@') ||
-                  !value.contains('.'))
+                  !value.contains('.')) {
                 return;
+              }
               Navigator.pop(dialogContext, value);
             },
             child: const Text('Continuer'),
@@ -1700,10 +2019,11 @@ class _InterventionEditorState extends State<InterventionEditor>
       false;
 
   void _showPhotoEmailMessage(String message) {
-    if (mounted)
+    if (mounted) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
+    }
   }
 
   Widget _photoSection() => Column(
@@ -1766,8 +2086,9 @@ class _InterventionEditorState extends State<InterventionEditor>
                           child: PopupMenuButton<String>(
                             color: surface,
                             onSelected: (v) {
-                              if (v == 'description')
+                              if (v == 'description') {
                                 _editPhotoDescription(photo);
+                              }
                               if (v == 'delete') _deletePhoto(photo);
                             },
                             itemBuilder: (c) => const [
@@ -2128,16 +2449,18 @@ class _InterventionEditorState extends State<InterventionEditor>
     );
     if (entered == null) return;
     if (!await SecurityService.instance.verifyPin(entered)) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('Code PIN incorrect.')));
+      }
       return;
     }
     if (!await _confirm(
       'Confirmer définitivement la suppression de cette intervention et de ses photos ?',
-    ))
+    )) {
       return;
+    }
     await GopsDatabase.instance.deleteIntervention(_id!);
     if (mounted) Navigator.pop(context);
   }
@@ -2242,6 +2565,10 @@ class _InterventionEditorState extends State<InterventionEditor>
 
   Future<void> _exportPdf() async {
     await _save();
+    if (_type == 'tcmp') {
+      await _exportTcpmPdf();
+      return;
+    }
     final selection = <String, bool>{
       'Informations générales': true,
       'Identités': true,
@@ -2307,8 +2634,9 @@ class _InterventionEditorState extends State<InterventionEditor>
           ? included.contains('Photos des identités')
           : included.contains('Photos des véhicules');
       final file = File(photo['local_path']! as String);
-      if (include && await file.exists())
+      if (include && await file.exists()) {
         includedPhotos.add((photo: photo, bytes: await file.readAsBytes()));
+      }
     }
     const ink = pd.PdfColor(0.06, 0.13, 0.21);
     const accent = pd.PdfColor(0.10, 0.34, 0.56);
@@ -2324,7 +2652,7 @@ class _InterventionEditorState extends State<InterventionEditor>
       ),
       child: pw.Text(
         title.toUpperCase(),
-        style: pw.TextStyle(
+        style: const pw.TextStyle(
           color: pd.PdfColors.white,
           fontSize: 11,
           fontWeight: pw.FontWeight.bold,
@@ -2346,7 +2674,7 @@ class _InterventionEditorState extends State<InterventionEditor>
             width: 132,
             child: pw.Text(
               label,
-              style: pw.TextStyle(
+              style: const pw.TextStyle(
                 color: accent,
                 fontSize: 9,
                 fontWeight: pw.FontWeight.bold,
@@ -2397,7 +2725,7 @@ class _InterventionEditorState extends State<InterventionEditor>
             children: [
               pw.Text(
                 'GOPS  /  FICHE D’INTERVENTION',
-                style: pw.TextStyle(
+                style: const pw.TextStyle(
                   color: ink,
                   fontSize: 9,
                   fontWeight: pw.FontWeight.bold,
@@ -2426,7 +2754,7 @@ class _InterventionEditorState extends State<InterventionEditor>
               children: [
                 pw.Text(
                   'COMPTE RENDU D’INTERVENTION',
-                  style: pw.TextStyle(
+                  style: const pw.TextStyle(
                     color: ink,
                     fontSize: 19,
                     fontWeight: pw.FontWeight.bold,
@@ -2436,7 +2764,7 @@ class _InterventionEditorState extends State<InterventionEditor>
                   pw.SizedBox(height: 4),
                   pw.Text(
                     _controllers['nature']!.text.trim(),
-                    style: pw.TextStyle(color: accent, fontSize: 12),
+                    style: const pw.TextStyle(color: accent, fontSize: 12),
                   ),
                 ],
               ],
@@ -2470,7 +2798,7 @@ class _InterventionEditorState extends State<InterventionEditor>
                 return card([
                   pw.Text(
                     '${index.toString().padLeft(2, '0')}  ${heading.isEmpty ? 'Personne' : heading}',
-                    style: pw.TextStyle(
+                    style: const pw.TextStyle(
                       color: ink,
                       fontSize: 11,
                       fontWeight: pw.FontWeight.bold,
@@ -2519,7 +2847,7 @@ class _InterventionEditorState extends State<InterventionEditor>
                 return card([
                   pw.Text(
                     '${index.toString().padLeft(2, '0')}  ${heading.isEmpty ? 'Véhicule' : heading}',
-                    style: pw.TextStyle(
+                    style: const pw.TextStyle(
                       color: ink,
                       fontSize: 11,
                       fontWeight: pw.FontWeight.bold,
@@ -2569,7 +2897,7 @@ class _InterventionEditorState extends State<InterventionEditor>
                       : item.photo['category'] == 'vehicule'
                       ? 'Photo de véhicule'
                       : 'Photo générale',
-                  style: pw.TextStyle(
+                  style: const pw.TextStyle(
                     color: accent,
                     fontSize: 9,
                     fontWeight: pw.FontWeight.bold,
@@ -2629,6 +2957,229 @@ class _InterventionEditorState extends State<InterventionEditor>
     );
   }
 
+  Future<void> _exportTcpmPdf() async {
+    final doc = pw.Document();
+    // PDF's built-in Helvetica is metrically compatible with Arial and keeps
+    // the exported form independent from fonts installed on the phone.
+    final regular = pw.Font.helvetica();
+    final medium = pw.Font.helveticaBold();
+    String cleanPdfText(String text) => text
+        .replaceAll('’', "'")
+        .replaceAll('‘', "'");
+    String value(String key) => cleanPdfText((_tcpm[key] ?? '').toString().trim());
+    String date(String key) => value(key);
+    List<Map<String, dynamic>> personRows(String key) =>
+        ((_tcpm[key] as List?) ?? [])
+            .map((entry) => Map<String, dynamic>.from(entry as Map))
+            .toList();
+    String joinWithEt(List<String> items) {
+      if (items.length < 2) return items.join();
+      if (items.length == 2) return '${items[0]} et ${items[1]}';
+      return '${items.take(items.length - 1).join(', ')} et ${items.last}';
+    }
+    String rowValue(Map<String, dynamic> row, int index) =>
+        (row[index.toString()] ?? '').toString().trim();
+
+    final patrolMembers = personRows('gendarmes').map((row) {
+      final grade = rowValue(row, 0);
+      final surname = rowValue(row, 1);
+      final quality = rowValue(row, 2);
+      final formattedGrade = grade.isEmpty
+          ? ''
+          : '${grade[0].toUpperCase()}${grade.substring(1)}';
+      final name = [formattedGrade, surname]
+          .where((part) => part.isNotEmpty)
+          .join(' ');
+      if (name.isEmpty && quality.isEmpty) return '';
+      final article = formattedGrade.isEmpty
+          ? 'de '
+          : RegExp(r'^[aeiouh]', caseSensitive: false).hasMatch(formattedGrade)
+          ? 'de l’'
+          : 'du ';
+      final identity = name.isEmpty ? 'd’un gendarme' : '$article$name';
+      return '$identity${quality.isEmpty ? '' : ', $quality'} de notre unité';
+    }).where((member) => member.isNotEmpty).toList();
+
+    final presentPeople = personRows('present_people').map((row) {
+      final name = [rowValue(row, 0), rowValue(row, 1)]
+          .where((part) => part.isNotEmpty)
+          .join(' ');
+      if (name.isEmpty) return '';
+      final details = <String>[];
+      final birthDate = rowValue(row, 2);
+      final birthPlace = rowValue(row, 3);
+      final address = rowValue(row, 4);
+      final phone = rowValue(row, 5);
+      if (birthDate.isNotEmpty) details.add('née le $birthDate');
+      if (birthPlace.isNotEmpty) details.add('à $birthPlace');
+      if (address.isNotEmpty) details.add('domiciliée à $address');
+      if (phone.isNotEmpty) details.add('joignable au $phone');
+      return ' $name${details.isEmpty ? '' : ', ${details.join(', ')}'}';
+    }).where((person) => person.isNotEmpty).toList();
+
+    final neighborStatements = personRows('neighbors').map((row) {
+      final name = [rowValue(row, 0), rowValue(row, 1)]
+          .where((part) => part.isNotEmpty)
+          .join(' ');
+      final details = <String>[];
+      final phone = rowValue(row, 2);
+      final address = rowValue(row, 3);
+      if (phone.isNotEmpty) details.add('joignable au $phone');
+      if (address.isNotEmpty) details.add('domicilié au $address');
+      final testimony = rowValue(row, 4);
+      final person = name.isEmpty ? 'La personne rencontrée' : name;
+      final contact = details.isEmpty ? '' : ', ${joinWithEt(details)}';
+      final statement = testimony.isEmpty
+          ? 'aucun renseignement n’est recueilli'
+          : testimony;
+      return '$person$contact, atteste que : $statement${statement.endsWith('.') ? '' : '.'}';
+    }).where((statement) => statement.isNotEmpty).toList();
+
+    const black = pd.PdfColor(0, 0, 0);
+    const grey = pd.PdfColor(0.35, 0.35, 0.35);
+    pw.Widget section(String title) => pw.Container(
+      width: double.infinity,
+      margin: const pw.EdgeInsets.only(top: 18, bottom: 9),
+      padding: const pw.EdgeInsets.only(bottom: 5),
+      decoration: const pw.BoxDecoration(
+        border: pw.Border(bottom: pw.BorderSide(color: black, width: 0.8)),
+      ),
+      child: pw.Text(
+        cleanPdfText(title).toUpperCase(),
+        style: const pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold),
+      ),
+    );
+    pw.Widget field(String label, String text) => pw.Padding(
+      padding: const pw.EdgeInsets.symmetric(vertical: 4),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.SizedBox(
+            width: 150,
+            child: pw.Text(cleanPdfText(label), style: const pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold)),
+          ),
+          pw.SizedBox(width: 8),
+          pw.Expanded(child: pw.Text(text.isEmpty ? ' ' : cleanPdfText(text), style: const pw.TextStyle(fontSize: 10))),
+        ],
+      ),
+    );
+    pw.Widget paragraph(String text) => pw.Padding(
+      padding: const pw.EdgeInsets.only(bottom: 7),
+      child: pw.Text(text.isEmpty ? ' ' : cleanPdfText(text), style: const pw.TextStyle(fontSize: 10, lineSpacing: 3)),
+    );
+    final unit = value('brigade');
+    doc.addPage(pw.MultiPage(
+      theme: pw.ThemeData.withFont(base: regular, bold: medium),
+      pageFormat: pd.PdfPageFormat.a4,
+      margin: const pw.EdgeInsets.fromLTRB(48, 62, 48, 54),
+      header: (context) => pw.Column(
+        children: [
+          pw.Row(
+            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+            children: [
+            ],
+          ),
+          pw.SizedBox(height: 6),
+          pw.Container(height: 0.8, color: black),
+          pw.SizedBox(height: 5),
+        ],
+      ),
+      footer: (context) => pw.Container(
+        padding: const pw.EdgeInsets.only(top: 5),
+        decoration: const pw.BoxDecoration(border: pw.Border(top: pw.BorderSide(color: grey, width: 0.5))),
+        child: pw.Row(
+          mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+          children: [
+            pw.Text(
+              'Feuillet n° ${context.pageNumber} / ${context.pagesCount}',
+              style: const pw.TextStyle(fontSize: 10),
+            ),
+          ],
+        ),
+      ),
+      build: (context) => [
+        pw.Center(child: pw.Text('PROCÈS-VERBAL DE CONSTATATIONS', style: const pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold))),
+        pw.Center(child: pw.Text('CAMBRIOLAGE  TCMP', style: const pw.TextStyle(fontSize: 10))),
+        section('Saisine'),
+        paragraph("Le ${date('engagement_date')} à ${date('engagement_time')} nous trouvant en prévention de proximité sur le secteur NORD-ISERE, nous sommes sollicité pour des constatations de cambriolages au"),
+        field('', _controllers['location']!.text.trim()),
+       
+        paragraph(
+          patrolMembers.isEmpty
+              ? 'Aucun gendarme renseigné dans la patrouille.'
+              : 'La patrouille est composée ${joinWithEt(patrolMembers)}.',
+        ),
+
+        section('Situation à l’arrivée des enquêteurs'),
+        paragraph("Nous arrivons sur les lieux à ${date('arrival_time')}"),
+        paragraph(
+          presentPeople.isEmpty
+              ? 'Aucune personne présente n’est renseignée.'
+              : 'Nous sommes accueillis par ${joinWithEt(presentPeople)}.',
+        ),
+        paragraph(' ${value('first_information')}'),
+
+        section('Mesures prises'),
+        paragraph(
+          _tcpm['photos_taken'] == null
+              ? 'La réalisation de clichés photographiques n’est pas renseignée.'
+              : _tcpm['photos_taken'] == true
+              ? 'Nous réalisons des clichés photographiques des lieux, à l’intérieur et à l’extérieur de l’habitation.'
+              : 'Nous ne réalisons pas de clichés photographiques des lieux.',
+        ),
+        paragraph(
+          _tcpm['pts_done'] == null
+              ? 'La réalisation d’opérations de police technique et scientifique (PTS) n’est pas renseignée.'
+              : _tcpm['pts_done'] == true
+              ? 'Nous réalisons des opérations de police technique et scientifique (PTS).'
+              : 'Aucune opération de police technique et scientifique (PTS) n’est réalisée.',
+        ),
+        if (_tcpm['pts_done'] == true && value('pts_conclusion').isNotEmpty)
+          paragraph('Le résultat des PTS est ${value('pts_conclusion').toLowerCase()}.'),
+        paragraph(
+          _tcpm['forced_entry_traces'] == null
+              ? 'La présence de traces d’effraction n’est pas renseignée.'
+              : _tcpm['forced_entry_traces'] == true
+              ? 'Nous constatons des traces d’effraction.'
+              : 'Nous ne constatons aucune trace d’effraction.',
+        ),
+
+        section('État des lieux'),
+        paragraph('Adresse : ${_controllers['location']!.text.trim()}'),
+        paragraph(value('place_state')),
+
+        section('Corps du délit'),
+        paragraph(value('corps_delit')),
+
+        section('Mesures diverses'),
+        paragraph(
+          _tcpm['complaint_invitation'] == null
+              ? 'L’invitation de la victime à déposer plainte n’est pas renseignée.'
+              : _tcpm['complaint_invitation'] == true
+              ? 'Nous invitons la victime à déposer plainte à la brigade${unit.isEmpty ? '' : ' $unit'}.'
+              : 'La victime n’est pas invitée à déposer plainte à la brigade.',
+        ),
+        paragraph(
+          _tcpm['neighborhood_inquiry'] == null
+              ? 'La réalisation d’une enquête de voisinage n’est pas renseignée.'
+              : _tcpm['neighborhood_inquiry'] == true
+              ? 'Nous réalisons une enquête de voisinage.'
+              : 'Aucune enquête de voisinage n’est réalisée.',
+        ),
+        if (_tcpm['neighborhood_inquiry'] == true)
+          if (neighborStatements.isEmpty)
+            paragraph('Aucun voisin rencontré n’est renseigné.')
+          else
+            for (final statement in neighborStatements) paragraph(statement),
+
+      ],
+    ));
+    final fileDate = _displayDate(_controllers['date']!.text);
+    await Printing.sharePdf(
+      bytes: await doc.save(),
+      filename: 'TCMP-${_safeFilename(_controllers['location']!.text, fileDate)}.pdf',
+    );
+  }
   String _safeFilename(String value, String date) {
     final name = value
         .trim()
@@ -2658,11 +3209,12 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _load() async {
     final b = await SecurityService.instance.biometricEnabled;
     final m = await SecurityService.instance.lockTimeoutMinutes();
-    if (mounted)
+    if (mounted) {
       setState(() {
         _biometric = b;
         _minutes = m;
       });
+    }
   }
 
   Future<void> _changePin() async {
@@ -2704,17 +3256,19 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     if (result == null) return;
     if (!await SecurityService.instance.verifyPin(result.$1)) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('PIN actuel incorrect.')));
+      }
       return;
     }
     await SecurityService.instance.createPin(result.$2);
-    if (mounted)
+    if (mounted) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('PIN modifié.')));
+    }
   }
 
   Future<void> _resetApplication() async {
@@ -2872,7 +3426,7 @@ class _SettingsPageState extends State<SettingsPage> {
           leading: Icon(Icons.info_outline),
           title: Text('GOPS V1'),
           subtitle: Text(
-            'Application individuelle · fonctionnement hors connexion. Export PDF via le partage système à l’initiative de l’utilisateur.',
+            'Les fiches restent stockées en local. La vue satellite Google nécessite une connexion Internet et une clé API. Les PDF sont partagés à votre initiative.',
           ),
         ),
         const Divider(),
